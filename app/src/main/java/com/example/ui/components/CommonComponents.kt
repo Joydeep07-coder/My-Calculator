@@ -57,9 +57,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
+import android.view.SoundEffectConstants
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -74,6 +76,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -452,6 +455,8 @@ enum class KeypadKeyVariant {
     SCIENTIFIC,
 }
 
+val LocalButtonSoundPlayer = staticCompositionLocalOf<(() -> Unit)?> { null }
+
 @Composable
 fun CalcKeypadButton(
     label: String,
@@ -460,11 +465,14 @@ fun CalcKeypadButton(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     hapticEnabled: Boolean = true,
+    soundEnabled: Boolean = false,
     fontSize: TextUnit = 22.sp,
     height: Dp = 62.dp,
     testTag: String = "key_$label",
 ) {
     val haptic = LocalHapticFeedback.current
+    val view = LocalView.current
+    val customSoundPlayer = LocalButtonSoundPlayer.current
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
@@ -508,6 +516,13 @@ fun CalcKeypadButton(
                 onClick = {
                     if (hapticEnabled) {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    }
+                    if (soundEnabled) {
+                        if (customSoundPlayer != null) {
+                            customSoundPlayer()
+                        } else {
+                            view.playSoundEffect(SoundEffectConstants.CLICK)
+                        }
                     }
                     onClick()
                 },

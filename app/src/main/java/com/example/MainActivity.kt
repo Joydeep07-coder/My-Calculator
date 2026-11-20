@@ -16,7 +16,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            val omniViewModel: OmniCalcViewModel = viewModel()
+            val omniViewModel: OmniCalcViewModel = viewModel(
+                factory = OmniCalcViewModel.provideFactory(applicationContext)
+            )
             val settings by omniViewModel.settings.collectAsStateWithLifecycle()
 
             OmniCalcTheme(themeMode = settings.themeMode) {

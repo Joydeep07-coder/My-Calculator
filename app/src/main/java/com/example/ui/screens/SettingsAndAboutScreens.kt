@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.CurrencyExchange
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Info
@@ -30,6 +31,7 @@ import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.Policy
 import androidx.compose.material.icons.rounded.Remove
+import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.Slideshow
 import androidx.compose.material.icons.rounded.Vibration
 import androidx.compose.material.icons.rounded.VolumeUp
@@ -63,6 +65,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.model.AngleMode
+import com.example.model.AppSettings
 import com.example.model.ThemeMode
 import com.example.navigation.AppRoutes
 import com.example.state.OmniCalcViewModel
@@ -82,8 +85,10 @@ fun SettingsScreen(
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     var showLanguageSheet by remember { mutableStateOf(false) }
+    var showCurrencySheet by remember { mutableStateOf(false) }
     var showPrivacySheet by remember { mutableStateOf(false) }
     var showClearHistoryDialog by remember { mutableStateOf(false) }
+    var showResetSettingsDialog by remember { mutableStateOf(false) }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -263,6 +268,14 @@ fun SettingsScreen(
                                 }
                             }
                         }
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        SettingActionRow(
+                            icon = Icons.Rounded.CurrencyExchange,
+                            title = "Default Currency",
+                            trailingText = "${settings.currencyCode} (${settings.currencySymbol()})",
+                            onClick = { showCurrencySheet = true },
+                            testTag = "setting_currency",
+                        )
                     }
 
                     // General & Data
@@ -287,6 +300,15 @@ fun SettingsScreen(
                             isDestructive = true,
                             onClick = { showClearHistoryDialog = true },
                             testTag = "setting_clear_history",
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        SettingActionRow(
+                            icon = Icons.Rounded.RestartAlt,
+                            title = "Reset Settings to Defaults",
+                            trailingText = null,
+                            isDestructive = true,
+                            onClick = { showResetSettingsDialog = true },
+                            testTag = "setting_reset_settings",
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         SettingActionRow(
@@ -373,8 +395,62 @@ fun SettingsScreen(
             }
         }
 
-        if (showPrivacySheet) {
+        if (showCurrencySheet) {
             val sheetState = rememberModalBottomSheetState()
+            ModalBottomSheet(
+                onDismissRequest = { showCurrencySheet = false },
+                sheetState = sheetState,
+                containerColor = MaterialTheme.colorScheme.surface,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("Select Default Currency", style = MaterialTheme.typography.titleLarge)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    AppSettings.supportedCurrencyCodes.forEach { (code, symbol) ->
+                        val selected = settings.currencyCode.equals(code, ignoreCase = true)
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (selected) {
+                                MaterialTheme.colorScheme.primaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.surfaceContainer
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    viewModel.setCurrencyCode(code)
+                                    showCurrencySheet = false
+                                }
+                                .testTag("currency_option_$code"),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("$code ($symbol)", style = MaterialTheme.typography.titleSmall)
+                                if (selected) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Check,
+                                        contentDescription = "Selected",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+            }
+        }
+
+        if (showPrivacySheet) {
+            val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
             ModalBottomSheet(
                 onDismissRequest = { showPrivacySheet = false },
                 sheetState = sheetState,
@@ -383,17 +459,23 @@ fun SettingsScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
                         .padding(horizontal = 20.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Text("Privacy Policy", style = MaterialTheme.typography.titleLarge)
                     Text(
-                        text = "My Calculator operates completely offline on your device during Phase 1 UI preview. No personal information, calculation history, or telemetry is transmitted to external servers.",
+                        text = "Local Data Storage: Your calculation history is saved strictly on your device using a local Room SQLite database, and your app preferences (theme, currency, precision, angle mode, haptics, sound, and language) are stored locally using Jetpack DataStore Preferences. You can delete individual entries, clear all history, or reset settings at any time.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
-                        text = "No storage, camera, location, or contact permissions are requested or required.",
+                        text = "Network Access: The Currency Converter connects over HTTPS to the public ExchangeRate-API (open.er-api.com) solely to retrieve live currency exchange rates when you open or refresh that tool. Standard calculator, scientific, GST, finance, unit, age, BMI, programmer, and graphing tools run 100% offline.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = "No Data Collection: My Calculator does not collect, sell, or share personal information, analytics, or calculation history with external servers. Only the INTERNET permission (for live exchange rates) is declared; no storage, camera, location, or contact permissions are requested.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -405,7 +487,7 @@ fun SettingsScreen(
         if (showClearHistoryDialog) {
             ConfirmActionDialog(
                 title = "Clear Calculation History?",
-                message = "Remove all entries from the History tab?",
+                message = "Remove all entries permanently from local history storage?",
                 confirmLabel = "Clear",
                 onConfirm = {
                     viewModel.clearAllHistory()
@@ -413,6 +495,20 @@ fun SettingsScreen(
                     scope.launch { snackbarHostState.showSnackbar("History cleared") }
                 },
                 onDismiss = { showClearHistoryDialog = false },
+            )
+        }
+
+        if (showResetSettingsDialog) {
+            ConfirmActionDialog(
+                title = "Reset Settings to Defaults?",
+                message = "Restore theme, currency, precision, angle mode, haptics, sound, and language to their default values?",
+                confirmLabel = "Reset",
+                onConfirm = {
+                    viewModel.resetSettings()
+                    showResetSettingsDialog = false
+                    scope.launch { snackbarHostState.showSnackbar("Settings reset to defaults") }
+                },
+                onDismiss = { showResetSettingsDialog = false },
             )
         }
     }
@@ -608,7 +704,7 @@ fun AboutScreen(
                         }
                         Spacer(modifier = Modifier.height(14.dp))
                         Text(
-                            text = "An all-in-one precision suite uniting Standard & Scientific calculators, Indian GST, Finance tools, 12 Unit Converters, Currency rates, Age & BMI health utilities, Programmer bitwise logic, and a multi-function Graph Plotter.",
+                            text = "An all-in-one precision suite uniting Standard & Scientific calculators, GST, Finance tools, 12 Unit Converters, Live Currency rates, Age & BMI health utilities, Programmer bitwise logic, and a multi-function Graph Plotter with persistent local history and customizable settings.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -623,11 +719,11 @@ fun AboutScreen(
                     Spacer(modifier = Modifier.height(10.dp))
                     val features = listOf(
                         "Standard & Scientific Calculators (DEG/RAD)",
-                        "Indian GST Calculator (CGST / SGST / IGST)",
+                        "GST Calculator (0–28% & Custom CGST/SGST/IGST)",
                         "Finance Suite (EMI, Simple, Compound, Discount)",
-                        "12-Category Unit Converter & Currency UI",
+                        "12-Category Unit Converter & Live Currency Rates",
                         "Age, BMI Scale, Programmer & Graph Plotter",
-                        "Adaptive Dark & Light Material 3 Themes",
+                        "Persistent History (Room) & Preferences (DataStore)",
                     )
                     features.forEach { feat ->
                         Text(

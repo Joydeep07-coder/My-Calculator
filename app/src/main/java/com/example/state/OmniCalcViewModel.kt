@@ -1,20 +1,32 @@
 package com.example.state
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
 import com.example.data.SampleCatalogs
+import com.example.data.local.DataStoreSettingsRepository
+import com.example.data.local.HistoryRepository
+import com.example.data.local.InMemoryHistoryRepository
+import com.example.data.local.InMemorySettingsRepository
+import com.example.data.local.OmniCalcDatabase
+import com.example.data.local.RoomHistoryRepository
+import com.example.data.local.SettingsRepository
 import com.example.model.AngleMode
 import com.example.model.AppSettings
 import com.example.model.HistoryEntry
-import com.example.model.HistoryGroup
 import com.example.model.ThemeMode
 import com.example.model.ToolItem
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import java.util.UUID
+import kotlinx.coroutines.launch
 
-class OmniCalcViewModel : ViewModel() {
+class OmniCalcViewModel(
+    private val historyRepository: HistoryRepository = InMemoryHistoryRepository(),
+    private val settingsRepository: SettingsRepository = InMemorySettingsRepository(),
+) : ViewModel() {
 
     private val _settings = MutableStateFlow(AppSettings())
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
@@ -37,41 +49,100 @@ class OmniCalcViewModel : ViewModel() {
     private val _onboardingCompleted = MutableStateFlow(false)
     val onboardingCompleted: StateFlow<Boolean> = _onboardingCompleted.asStateFlow()
 
+    init {
+        viewModelScope.launch {
+            settingsRepository.settings.collect { loaded ->
+                _settings.value = loaded
+            }
+        }
+        viewModelScope.launch {
+            settingsRepository.onboardingCompleted.collect { completed ->
+                _onboardingCompleted.value = completed
+            }
+        }
+        viewModelScope.launch {
+            settingsRepository.recentToolIds.collect { ids ->
+                _recentToolIds.value = ids
+            }
+        }
+        viewModelScope.launch {
+            historyRepository.historyEntries.collect { entries ->
+                _history.value = entries
+                val latestCalc = entries.firstOrNull {
+                    it.toolName == "Standard" || it.toolName == "Scientific"
+                }
+                if (latestCalc != null) {
+                    _lastPreviewExpression.value = latestCalc.expression
+                    _lastPreviewResult.value = latestCalc.result
+                } else if (_lastPreviewExpression.value.isNotEmpty() && entries.isEmpty()) {
+                    _lastPreviewExpression.value = ""
+                    _lastPreviewResult.value = "0"
+                }
+            }
+        }
+    }
+
+    private fun updateAndPersistSettings(transform: (AppSettings) -> AppSettings) {
+        val updated = transform(_settings.value)
+        _settings.value = updated
+        viewModelScope.launch {
+            settingsRepository.saveSettings(updated)
+        }
+    }
+
     fun markOnboardingCompleted() {
         _onboardingCompleted.value = true
+        viewModelScope.launch {
+            settingsRepository.setOnboardingCompleted(true)
+        }
     }
 
     fun setThemeMode(mode: ThemeMode) {
-        _settings.update { it.copy(themeMode = mode) }
+        updateAndPersistSettings { it.copy(themeMode = mode) }
     }
 
     fun setHapticFeedback(enabled: Boolean) {
-        _settings.update { it.copy(hapticFeedback = enabled) }
+        updateAndPersistSettings { it.copy(hapticFeedback = enabled) }
     }
 
     fun setButtonSound(enabled: Boolean) {
-        _settings.update { it.copy(buttonSound = enabled) }
+        updateAndPersistSettings { it.copy(buttonSound = enabled) }
     }
 
     fun setDecimalPrecision(precision: Int) {
-        _settings.update { it.copy(decimalPrecision = precision.coerceIn(2, 10)) }
+        val clamped = precision.coerceIn(2, 10)
+        updateAndPersistSettings { it.copy(decimalPrecision = clamped) }
     }
 
     fun setThousandsSeparator(enabled: Boolean) {
-        _settings.update { it.copy(thousandsSeparator = enabled) }
+        updateAndPersistSettings { it.copy(thousandsSeparator = enabled) }
     }
 
     fun setAngleMode(mode: AngleMode) {
-        _settings.update { it.copy(angleMode = mode) }
+        updateAndPersistSettings { it.copy(angleMode = mode) }
     }
 
     fun setLanguage(language: String) {
-        _settings.update { it.copy(language = language) }
+        updateAndPersistSettings { it.copy(language = language) }
+    }
+
+    fun setCurrencyCode(code: String) {
+        updateAndPersistSettings { it.copy(currencyCode = code.uppercase()) }
+    }
+
+    fun resetSettings() {
+        val defaults = AppSettings()
+        _settings.value = defaults
+        viewModelScope.launch {
+            settingsRepository.resetSettings()
+        }
     }
 
     fun markToolUsed(toolId: String) {
-        _recentToolIds.update { current ->
-            (listOf(toolId) + current.filterNot { it == toolId }).take(6)
+        val updated = (listOf(toolId) + _recentToolIds.value.filterNot { it == toolId }).take(6)
+        _recentToolIds.value = updated
+        viewModelScope.launch {
+            settingsRepository.setRecentToolIds(updated)
         }
     }
 
@@ -81,28 +152,37 @@ class OmniCalcViewModel : ViewModel() {
         toolName: String,
         reusableRoute: String,
     ) {
-        val entry = HistoryEntry(
-            id = UUID.randomUUID().toString(),
-            expression = expression,
-            result = result,
-            toolName = toolName,
-            timeLabel = "Just now",
-            group = HistoryGroup.TODAY,
-            reusableRoute = reusableRoute,
-        )
-        _history.update { listOf(entry) + it }
-        if (toolName == "Standard" || toolName == "Scientific") {
-            _lastPreviewExpression.value = expression
-            _lastPreviewResult.value = result
+        val cleanExpr = expression.trim()
+        val cleanResult = result.trim()
+        val cleanTool = toolName.trim()
+        if (cleanTool == "Standard" || cleanTool == "Scientific") {
+            if (cleanExpr.isNotEmpty() && cleanResult.isNotEmpty() && cleanResult != "Error") {
+                _lastPreviewExpression.value = cleanExpr
+                _lastPreviewResult.value = cleanResult
+            }
+        }
+        viewModelScope.launch {
+            historyRepository.addEntry(
+                expression = cleanExpr,
+                result = cleanResult,
+                toolName = cleanTool,
+                reusableRoute = reusableRoute,
+            )
         }
     }
 
     fun deleteHistoryEntry(id: String) {
-        _history.update { list -> list.filterNot { it.id == id } }
+        viewModelScope.launch {
+            historyRepository.deleteById(id)
+        }
     }
 
     fun clearAllHistory() {
-        _history.value = emptyList()
+        _lastPreviewExpression.value = ""
+        _lastPreviewResult.value = "0"
+        viewModelScope.launch {
+            historyRepository.clearAll()
+        }
     }
 
     fun setReusedExpression(expression: String?) {
@@ -112,5 +192,23 @@ class OmniCalcViewModel : ViewModel() {
     fun getRecentTools(): List<ToolItem> {
         val map = SampleCatalogs.allTools.associateBy { it.id }
         return _recentToolIds.value.mapNotNull { map[it] }
+    }
+
+    companion object {
+        fun provideFactory(context: Context): ViewModelProvider.Factory {
+            val appContext = context.applicationContext
+            return object : ViewModelProvider.Factory {
+                @Suppress("UNCHECKED_CAST")
+                override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                    val database = OmniCalcDatabase.getInstance(appContext)
+                    val historyRepo = RoomHistoryRepository(database.historyDao())
+                    val settingsRepo = DataStoreSettingsRepository(appContext)
+                    return OmniCalcViewModel(
+                        historyRepository = historyRepo,
+                        settingsRepository = settingsRepo,
+                    ) as T
+                }
+            }
+        }
     }
 }

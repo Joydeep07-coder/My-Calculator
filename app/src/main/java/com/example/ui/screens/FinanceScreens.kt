@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,9 +47,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.SampleCatalogs
 import com.example.navigation.AppRoutes
 import com.example.state.OmniCalcViewModel
+import com.example.ui.components.ErrorStateBanner
 import com.example.ui.components.OmniCard
 import com.example.ui.components.OmniInputField
 import com.example.ui.components.OmniResultCard
@@ -58,7 +61,230 @@ import com.example.ui.theme.AccentCyan
 import com.example.ui.theme.AccentEmerald
 import com.example.ui.theme.VioletPrimary
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.pow
+import kotlin.math.round
+
+sealed class EmiCalculationResult {
+    data object Empty : EmiCalculationResult()
+    data class Error(val message: String) : EmiCalculationResult()
+    data class Valid(
+        val principal: Double,
+        val annualRate: Double,
+        val months: Int,
+        val monthlyEmi: Double,
+        val avgMonthlyPrincipal: Double,
+        val avgMonthlyInterest: Double,
+        val month1Principal: Double,
+        val month1Interest: Double,
+        val totalInterest: Double,
+        val totalPayment: Double,
+        val principalShare: Double,
+        val interestShare: Double,
+    ) : EmiCalculationResult()
+}
+
+fun calculateEmi(
+    loanAmountInput: String,
+    rateInput: String,
+    tenureInput: String,
+    isYears: Boolean,
+): EmiCalculationResult {
+    if (loanAmountInput.isNotBlank()) {
+        val p = loanAmountInput.trim().toDoubleOrNull()
+            ?: return EmiCalculationResult.Error("Enter a valid numeric loan amount.")
+        if (!p.isFinite() || p <= 0.0) {
+            return EmiCalculationResult.Error("Loan amount must be greater than 0.")
+        }
+    }
+    if (rateInput.isNotBlank()) {
+        val r = rateInput.trim().toDoubleOrNull()
+            ?: return EmiCalculationResult.Error("Enter a valid annual interest rate.")
+        if (!r.isFinite() || r < 0.0 || r > 100.0) {
+            return EmiCalculationResult.Error("Interest rate must be between 0% and 100%.")
+        }
+    }
+    if (tenureInput.isNotBlank()) {
+        val t = tenureInput.trim().toDoubleOrNull()
+            ?: return EmiCalculationResult.Error("Enter a valid loan tenure.")
+        if (!t.isFinite() || t <= 0.0) {
+            return EmiCalculationResult.Error("Loan tenure must be greater than 0.")
+        }
+        if (!isYears && abs(t - round(t)) > 1e-6) {
+            return EmiCalculationResult.Error("Tenure in months must be a whole number.")
+        }
+        val m = round(if (isYears) t * 12.0 else t)
+        if (m < 1.0 || m > 1200.0) {
+            return EmiCalculationResult.Error("Tenure must be between 1 and 1200 months.")
+        }
+    }
+
+    if (loanAmountInput.isBlank() || rateInput.isBlank() || tenureInput.isBlank()) {
+        return EmiCalculationResult.Empty
+    }
+
+    val principal = loanAmountInput.trim().toDouble()
+    val annualRate = rateInput.trim().toDouble()
+    val rawTenure = tenureInput.trim().toDouble()
+    val months = round(if (isYears) rawTenure * 12.0 else rawTenure).toInt().coerceAtLeast(1)
+
+    val monthlyRate = annualRate / 12.0 / 100.0
+    val monthlyEmi: Double
+    val totalPayment: Double
+    val totalInterest: Double
+
+    if (monthlyRate == 0.0) {
+        monthlyEmi = principal / months
+        totalPayment = principal
+        totalInterest = 0.0
+    } else {
+        val factor = (1.0 + monthlyRate).pow(months)
+        if (!factor.isFinite() || factor <= 1.0) {
+            return EmiCalculationResult.Error("Loan tenure or rate exceeds supported calculation range.")
+        }
+        monthlyEmi = principal * monthlyRate * factor / (factor - 1.0)
+        if (!monthlyEmi.isFinite()) {
+            return EmiCalculationResult.Error("Loan calculation overflow.")
+        }
+        totalPayment = monthlyEmi * months
+        totalInterest = (totalPayment - principal).coerceAtLeast(0.0)
+    }
+
+    val month1Interest = principal * monthlyRate
+    val month1Principal = (monthlyEmi - month1Interest).coerceAtLeast(0.0)
+    val principalShare = if (totalPayment > 0.0) (principal / totalPayment).coerceIn(0.0, 1.0) else 1.0
+    val interestShare = (1.0 - principalShare).coerceIn(0.0, 1.0)
+
+    return EmiCalculationResult.Valid(
+        principal = principal,
+        annualRate = annualRate,
+        months = months,
+        monthlyEmi = monthlyEmi,
+        avgMonthlyPrincipal = principal / months,
+        avgMonthlyInterest = totalInterest / months,
+        month1Principal = month1Principal,
+        month1Interest = month1Interest,
+        totalInterest = totalInterest,
+        totalPayment = totalPayment,
+        principalShare = principalShare,
+        interestShare = interestShare,
+    )
+}
+
+sealed class SimpleOrCompoundResult {
+    data object Empty : SimpleOrCompoundResult()
+    data class Error(val message: String) : SimpleOrCompoundResult()
+    data class Valid(
+        val principal: Double,
+        val annualRate: Double,
+        val years: Double,
+        val interest: Double,
+        val totalAmount: Double,
+    ) : SimpleOrCompoundResult()
+}
+
+fun calculateSimpleInterest(
+    principalInput: String,
+    rateInput: String,
+    timeInput: String,
+): SimpleOrCompoundResult {
+    if (principalInput.isNotBlank()) {
+        val p = principalInput.trim().toDoubleOrNull()
+            ?: return SimpleOrCompoundResult.Error("Enter a valid numeric principal.")
+        if (!p.isFinite() || p < 0.0) return SimpleOrCompoundResult.Error("Principal cannot be negative.")
+    }
+    if (rateInput.isNotBlank()) {
+        val r = rateInput.trim().toDoubleOrNull()
+            ?: return SimpleOrCompoundResult.Error("Enter a valid annual interest rate.")
+        if (!r.isFinite() || r < 0.0) return SimpleOrCompoundResult.Error("Interest rate cannot be negative.")
+    }
+    if (timeInput.isNotBlank()) {
+        val t = timeInput.trim().toDoubleOrNull()
+            ?: return SimpleOrCompoundResult.Error("Enter a valid time period.")
+        if (!t.isFinite() || t < 0.0) return SimpleOrCompoundResult.Error("Time period cannot be negative.")
+    }
+    if (principalInput.isBlank() || rateInput.isBlank() || timeInput.isBlank()) {
+        return SimpleOrCompoundResult.Empty
+    }
+    val principal = principalInput.trim().toDouble()
+    val rate = rateInput.trim().toDouble()
+    val years = timeInput.trim().toDouble()
+    val interest = principal * rate * years / 100.0
+    val total = principal + interest
+    if (!total.isFinite()) return SimpleOrCompoundResult.Error("Values exceed calculation range.")
+    return SimpleOrCompoundResult.Valid(principal, rate, years, interest, total)
+}
+
+fun calculateCompoundInterest(
+    principalInput: String,
+    rateInput: String,
+    timeInput: String,
+    frequencyPerYear: Int,
+): SimpleOrCompoundResult {
+    if (principalInput.isNotBlank()) {
+        val p = principalInput.trim().toDoubleOrNull()
+            ?: return SimpleOrCompoundResult.Error("Enter a valid numeric principal.")
+        if (!p.isFinite() || p < 0.0) return SimpleOrCompoundResult.Error("Principal cannot be negative.")
+    }
+    if (rateInput.isNotBlank()) {
+        val r = rateInput.trim().toDoubleOrNull()
+            ?: return SimpleOrCompoundResult.Error("Enter a valid annual interest rate.")
+        if (!r.isFinite() || r < 0.0) return SimpleOrCompoundResult.Error("Interest rate cannot be negative.")
+    }
+    if (timeInput.isNotBlank()) {
+        val t = timeInput.trim().toDoubleOrNull()
+            ?: return SimpleOrCompoundResult.Error("Enter a valid time period.")
+        if (!t.isFinite() || t < 0.0) return SimpleOrCompoundResult.Error("Time period cannot be negative.")
+    }
+    if (principalInput.isBlank() || rateInput.isBlank() || timeInput.isBlank()) {
+        return SimpleOrCompoundResult.Empty
+    }
+    val principal = principalInput.trim().toDouble()
+    val rate = rateInput.trim().toDouble()
+    val years = timeInput.trim().toDouble()
+    val freq = frequencyPerYear.coerceAtLeast(1)
+    val total = principal * (1.0 + (rate / 100.0) / freq).pow(freq * years)
+    if (!total.isFinite()) return SimpleOrCompoundResult.Error("Values exceed calculation range.")
+    val interest = (total - principal).coerceAtLeast(0.0)
+    return SimpleOrCompoundResult.Valid(principal, rate, years, interest, total)
+}
+
+sealed class DiscountCalculationResult {
+    data object Empty : DiscountCalculationResult()
+    data class Error(val message: String) : DiscountCalculationResult()
+    data class Valid(
+        val originalPrice: Double,
+        val discountPercent: Double,
+        val discountAmount: Double,
+        val finalPrice: Double,
+    ) : DiscountCalculationResult()
+}
+
+fun calculateDiscount(
+    priceInput: String,
+    discountInput: String,
+): DiscountCalculationResult {
+    if (priceInput.isNotBlank()) {
+        val p = priceInput.trim().toDoubleOrNull()
+            ?: return DiscountCalculationResult.Error("Enter a valid price.")
+        if (!p.isFinite() || p < 0.0) return DiscountCalculationResult.Error("Price cannot be negative.")
+    }
+    if (discountInput.isNotBlank()) {
+        val d = discountInput.trim().toDoubleOrNull()
+            ?: return DiscountCalculationResult.Error("Enter a valid discount percentage.")
+        if (!d.isFinite() || d < 0.0 || d > 100.0) {
+            return DiscountCalculationResult.Error("Discount percentage must be between 0% and 100%.")
+        }
+    }
+    if (priceInput.isBlank() || discountInput.isBlank()) {
+        return DiscountCalculationResult.Empty
+    }
+    val originalPrice = priceInput.trim().toDouble()
+    val discountPct = discountInput.trim().toDouble()
+    val discountAmount = originalPrice * discountPct / 100.0
+    val finalPrice = (originalPrice - discountAmount).coerceAtLeast(0.0)
+    return DiscountCalculationResult.Valid(originalPrice, discountPct, discountAmount, finalPrice)
+}
 
 @Composable
 fun FinanceHubScreen(
@@ -191,25 +417,21 @@ fun EmiCalculatorScreen(
     var tenureInput by remember { mutableStateOf("") }
     var isYears by remember { mutableStateOf(true) }
 
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    val principal = (loanAmountInput.toDoubleOrNull() ?: 0.0).coerceAtLeast(0.0)
-    val annualRate = (rateInput.toDoubleOrNull() ?: 0.0).coerceAtLeast(0.0)
-    val rawTenure = (tenureInput.toDoubleOrNull() ?: 0.0).coerceAtLeast(1.0)
-    val months = if (isYears) (rawTenure * 12).toInt().coerceAtLeast(1) else rawTenure.toInt().coerceAtLeast(1)
-
-    val monthlyRate = annualRate / 12.0 / 100.0
-    val emi = if (monthlyRate == 0.0) {
-        principal / months
-    } else {
-        val factor = (1.0 + monthlyRate).pow(months)
-        principal * monthlyRate * factor / (factor - 1.0)
+    val emiResult = remember(loanAmountInput, rateInput, tenureInput, isYears) {
+        calculateEmi(
+            loanAmountInput = loanAmountInput,
+            rateInput = rateInput,
+            tenureInput = tenureInput,
+            isYears = isYears,
+        )
     }
-    val totalPayment = emi * months
-    val totalInterest = (totalPayment - principal).coerceAtLeast(0.0)
 
-    fun fmt(v: Double) = "₹" + SampleCatalogs.formatNumber(v, 0, true)
+    fun fmt(v: Double): String = formatSettingsCurrency(v, settings)
+    val sliderRate = (rateInput.trim().toDoubleOrNull() ?: 0.0).toFloat().coerceIn(0f, 25f)
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -217,7 +439,7 @@ fun EmiCalculatorScreen(
         topBar = {
             OmniTopBar(
                 title = "EMI Calculator",
-                subtitle = "Equated monthly installment & interest split",
+                subtitle = "Monthly loan installment & interest split (${settings.currencyCode})",
                 onBack = onBack,
             )
         },
@@ -241,7 +463,7 @@ fun EmiCalculatorScreen(
                         value = loanAmountInput,
                         onValueChange = { loanAmountInput = it },
                         label = "Loan Amount",
-                        prefixText = "₹",
+                        prefixText = settings.currencySymbol(),
                         testTag = "emi_loan_input",
                     )
                     Spacer(modifier = Modifier.height(12.dp))
@@ -270,6 +492,7 @@ fun EmiCalculatorScreen(
                                 selectedContainerColor = MaterialTheme.colorScheme.primary,
                                 selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
                             ),
+                            modifier = Modifier.testTag("emi_tenure_years"),
                         )
                         FilterChip(
                             selected = !isYears,
@@ -279,19 +502,31 @@ fun EmiCalculatorScreen(
                                 selectedContainerColor = MaterialTheme.colorScheme.primary,
                                 selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
                             ),
+                            modifier = Modifier.testTag("emi_tenure_months"),
                         )
                     }
                     Slider(
-                        value = annualRate.toFloat().coerceIn(1f, 25f),
+                        value = sliderRate,
                         onValueChange = { rateInput = SampleCatalogs.formatNumber(it.toDouble(), 1, false) },
-                        valueRange = 1f..25f,
+                        valueRange = 0f..25f,
                     )
                 }
 
-                // Visual Breakdown Bar
-                if (totalPayment > 0) {
-                    val principalRatio = (principal / totalPayment).toFloat().coerceIn(0.05f, 0.95f)
-                    OmniCard {
+                if (emiResult is EmiCalculationResult.Error) {
+                    ErrorStateBanner(
+                        message = emiResult.message,
+                        modifier = Modifier.testTag("emi_error_banner"),
+                    )
+                }
+
+                // Visual Breakdown Bar (reflects exact principal vs interest percentages)
+                if (emiResult is EmiCalculationResult.Valid && emiResult.totalPayment > 0.0) {
+                    val principalRatio = emiResult.principalShare.toFloat().coerceIn(0f, 1f)
+                    val interestRatio = emiResult.interestShare.toFloat().coerceIn(0f, 1f)
+                    val principalPctStr = SampleCatalogs.formatNumber(emiResult.principalShare * 100.0, 1, false)
+                    val interestPctStr = SampleCatalogs.formatNumber(emiResult.interestShare * 100.0, 1, false)
+
+                    OmniCard(modifier = Modifier.testTag("emi_breakdown_card")) {
                         Text(
                             text = "Payment Breakdown",
                             style = MaterialTheme.typography.titleSmall,
@@ -304,18 +539,22 @@ fun EmiCalculatorScreen(
                                 .height(14.dp)
                                 .clip(RoundedCornerShape(50)),
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .weight(principalRatio)
-                                    .fillMaxSize()
-                                    .background(VioletPrimary)
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f - principalRatio)
-                                    .fillMaxSize()
-                                    .background(AccentEmerald)
-                            )
+                            if (principalRatio > 0.0001f) {
+                                Box(
+                                    modifier = Modifier
+                                        .weight(principalRatio)
+                                        .fillMaxSize()
+                                        .background(VioletPrimary)
+                                )
+                            }
+                            if (interestRatio > 0.0001f) {
+                                Box(
+                                    modifier = Modifier
+                                        .weight(interestRatio)
+                                        .fillMaxSize()
+                                        .background(AccentEmerald)
+                                )
+                            }
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         Row(
@@ -323,36 +562,64 @@ fun EmiCalculatorScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
                             Text(
-                                text = "● Principal (${(principalRatio * 100).toInt()}%)",
+                                text = "● Principal ($principalPctStr%)",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = VioletPrimary,
+                                modifier = Modifier.testTag("emi_principal_pct"),
                             )
                             Text(
-                                text = "● Interest (${100 - (principalRatio * 100).toInt()}%)",
+                                text = "● Interest ($interestPctStr%)",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = AccentEmerald,
+                                modifier = Modifier.testTag("emi_interest_pct"),
                             )
                         }
                     }
                 }
 
-                OmniResultCard(
-                    label = "Monthly EMI",
-                    primaryValue = "${fmt(emi)} / mo",
-                    badgeText = "$months Months",
-                    onCopy = { scope.launch { snackbarHostState.showSnackbar("Copied EMI summary") } },
-                    breakdown = listOf(
-                        "Principal Amount" to fmt(principal),
-                        "Total Interest Payable" to fmt(totalInterest),
-                        "Total Payment" to fmt(totalPayment),
-                    ),
-                )
+                when (emiResult) {
+                    is EmiCalculationResult.Valid -> {
+                        OmniResultCard(
+                            label = "Monthly EMI",
+                            primaryValue = "${fmt(emiResult.monthlyEmi)} / mo",
+                            badgeText = "${emiResult.months} Months",
+                            onCopy = { scope.launch { snackbarHostState.showSnackbar("Copied EMI summary") } },
+                            breakdown = listOf(
+                                "Avg. Monthly Principal" to fmt(emiResult.avgMonthlyPrincipal),
+                                "Avg. Monthly Interest" to fmt(emiResult.avgMonthlyInterest),
+                                "Month 1 Principal" to fmt(emiResult.month1Principal),
+                                "Month 1 Interest" to fmt(emiResult.month1Interest),
+                                "Principal Amount" to fmt(emiResult.principal),
+                                "Total Interest Payable" to fmt(emiResult.totalInterest),
+                                "Total Payment" to fmt(emiResult.totalPayment),
+                            ),
+                            modifier = Modifier.testTag("emi_result_card"),
+                        )
+                    }
+                    else -> {
+                        OmniResultCard(
+                            label = "Monthly EMI",
+                            primaryValue = "—",
+                            badgeText = null,
+                            breakdown = listOf(
+                                "Avg. Monthly Principal" to "—",
+                                "Avg. Monthly Interest" to "—",
+                                "Principal Amount" to "—",
+                                "Total Interest Payable" to "—",
+                                "Total Payment" to "—",
+                            ),
+                            modifier = Modifier.testTag("emi_result_card"),
+                        )
+                    }
+                }
 
                 Button(
+                    enabled = emiResult is EmiCalculationResult.Valid,
                     onClick = {
+                        val valid = emiResult as? EmiCalculationResult.Valid ?: return@Button
                         viewModel.addHistoryEntry(
-                            expression = "EMI ${fmt(principal)} @ $rateInput% · ${months}m",
-                            result = "${fmt(emi)}/mo",
+                            expression = "EMI ${fmt(valid.principal)} @ ${SampleCatalogs.formatNumber(valid.annualRate, 2, false)}% · ${valid.months}m",
+                            result = "${fmt(valid.monthlyEmi)}/mo",
                             toolName = "EMI",
                             reusableRoute = AppRoutes.FINANCE_EMI,
                         )
@@ -381,16 +648,14 @@ fun SimpleInterestScreen(
     var principalInput by remember { mutableStateOf("") }
     var rateInput by remember { mutableStateOf("") }
     var timeInput by remember { mutableStateOf("") }
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    val principal = (principalInput.toDoubleOrNull() ?: 0.0).coerceAtLeast(0.0)
-    val rate = (rateInput.toDoubleOrNull() ?: 0.0).coerceAtLeast(0.0)
-    val years = (timeInput.toDoubleOrNull() ?: 0.0).coerceAtLeast(0.0)
-
-    val interest = principal * rate * years / 100.0
-    val finalAmount = principal + interest
-    fun fmt(v: Double) = "₹" + SampleCatalogs.formatNumber(v, 2, true)
+    val siResult = remember(principalInput, rateInput, timeInput) {
+        calculateSimpleInterest(principalInput, rateInput, timeInput)
+    }
+    fun fmt(v: Double): String = formatSettingsCurrency(v, settings)
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -398,7 +663,7 @@ fun SimpleInterestScreen(
         topBar = {
             OmniTopBar(
                 title = "Simple Interest",
-                subtitle = "Linear interest returns calculator",
+                subtitle = "Linear interest returns (${settings.currencyCode})",
                 onBack = onBack,
             )
         },
@@ -422,7 +687,7 @@ fun SimpleInterestScreen(
                         value = principalInput,
                         onValueChange = { principalInput = it },
                         label = "Principal Amount",
-                        prefixText = "₹",
+                        prefixText = settings.currencySymbol(),
                         testTag = "si_principal_input",
                     )
                     Spacer(modifier = Modifier.height(12.dp))
@@ -443,23 +708,44 @@ fun SimpleInterestScreen(
                     )
                 }
 
-                OmniResultCard(
-                    label = "Final Maturity Amount",
-                    primaryValue = fmt(finalAmount),
-                    badgeText = "${SampleCatalogs.formatNumber(years, 1, false)} Yrs",
-                    onCopy = { scope.launch { snackbarHostState.showSnackbar("Copied amount") } },
-                    breakdown = listOf(
-                        "Principal Invested" to fmt(principal),
-                        "Total Interest Earned" to fmt(interest),
-                        "Final Amount" to fmt(finalAmount),
-                    ),
-                )
+                if (siResult is SimpleOrCompoundResult.Error) {
+                    ErrorStateBanner(message = siResult.message)
+                }
+
+                when (siResult) {
+                    is SimpleOrCompoundResult.Valid -> {
+                        OmniResultCard(
+                            label = "Final Maturity Amount",
+                            primaryValue = fmt(siResult.totalAmount),
+                            badgeText = "${SampleCatalogs.formatNumber(siResult.years, 1, false)} Yrs",
+                            onCopy = { scope.launch { snackbarHostState.showSnackbar("Copied amount") } },
+                            breakdown = listOf(
+                                "Principal Invested" to fmt(siResult.principal),
+                                "Total Interest Earned" to fmt(siResult.interest),
+                                "Final Amount" to fmt(siResult.totalAmount),
+                            ),
+                        )
+                    }
+                    else -> {
+                        OmniResultCard(
+                            label = "Final Maturity Amount",
+                            primaryValue = "—",
+                            breakdown = listOf(
+                                "Principal Invested" to "—",
+                                "Total Interest Earned" to "—",
+                                "Final Amount" to "—",
+                            ),
+                        )
+                    }
+                }
 
                 Button(
+                    enabled = siResult is SimpleOrCompoundResult.Valid,
                     onClick = {
+                        val valid = siResult as? SimpleOrCompoundResult.Valid ?: return@Button
                         viewModel.addHistoryEntry(
-                            expression = "SI ${fmt(principal)} @ $rateInput% × ${timeInput}y",
-                            result = fmt(finalAmount),
+                            expression = "SI ${fmt(valid.principal)} @ ${SampleCatalogs.formatNumber(valid.annualRate, 2, false)}% × ${SampleCatalogs.formatNumber(valid.years, 2, false)}y",
+                            result = fmt(valid.totalAmount),
                             toolName = "Simple Interest",
                             reusableRoute = AppRoutes.FINANCE_SIMPLE_INTEREST,
                         )
@@ -487,16 +773,14 @@ fun CompoundInterestScreen(
     var timeInput by remember { mutableStateOf("") }
     var frequencyPerYear by remember { mutableStateOf(4) } // Quarterly default
 
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    val principal = (principalInput.toDoubleOrNull() ?: 0.0).coerceAtLeast(0.0)
-    val rate = (rateInput.toDoubleOrNull() ?: 0.0).coerceAtLeast(0.0) / 100.0
-    val years = (timeInput.toDoubleOrNull() ?: 0.0).coerceAtLeast(0.0)
-
-    val finalAmount = principal * (1.0 + rate / frequencyPerYear).pow(frequencyPerYear * years)
-    val interestEarned = (finalAmount - principal).coerceAtLeast(0.0)
-    fun fmt(v: Double) = "₹" + SampleCatalogs.formatNumber(v, 2, true)
+    val ciResult = remember(principalInput, rateInput, timeInput, frequencyPerYear) {
+        calculateCompoundInterest(principalInput, rateInput, timeInput, frequencyPerYear)
+    }
+    fun fmt(v: Double): String = formatSettingsCurrency(v, settings)
 
     val frequencies = listOf(
         1 to "Yearly",
@@ -511,7 +795,7 @@ fun CompoundInterestScreen(
         topBar = {
             OmniTopBar(
                 title = "Compound Interest",
-                subtitle = "Flexible compounding frequency",
+                subtitle = "Flexible compounding frequency (${settings.currencyCode})",
                 onBack = onBack,
             )
         },
@@ -535,7 +819,7 @@ fun CompoundInterestScreen(
                         value = principalInput,
                         onValueChange = { principalInput = it },
                         label = "Principal Amount",
-                        prefixText = "₹",
+                        prefixText = settings.currencySymbol(),
                         testTag = "ci_principal_input",
                     )
                     Spacer(modifier = Modifier.height(12.dp))
@@ -562,8 +846,10 @@ fun CompoundInterestScreen(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         frequencies.forEach { (freq, label) ->
                             FilterChip(
@@ -579,23 +865,46 @@ fun CompoundInterestScreen(
                     }
                 }
 
-                OmniResultCard(
-                    label = "Final Compound Amount",
-                    primaryValue = fmt(finalAmount),
-                    badgeText = frequencies.first { it.first == frequencyPerYear }.second,
-                    onCopy = { scope.launch { snackbarHostState.showSnackbar("Copied amount") } },
-                    breakdown = listOf(
-                        "Principal" to fmt(principal),
-                        "Interest Earned" to fmt(interestEarned),
-                        "Final Amount" to fmt(finalAmount),
-                    ),
-                )
+                if (ciResult is SimpleOrCompoundResult.Error) {
+                    ErrorStateBanner(message = ciResult.message)
+                }
+
+                val freqLabel = frequencies.first { it.first == frequencyPerYear }.second
+                when (ciResult) {
+                    is SimpleOrCompoundResult.Valid -> {
+                        OmniResultCard(
+                            label = "Final Compound Amount",
+                            primaryValue = fmt(ciResult.totalAmount),
+                            badgeText = freqLabel,
+                            onCopy = { scope.launch { snackbarHostState.showSnackbar("Copied amount") } },
+                            breakdown = listOf(
+                                "Principal" to fmt(ciResult.principal),
+                                "Interest Earned" to fmt(ciResult.interest),
+                                "Final Amount" to fmt(ciResult.totalAmount),
+                            ),
+                        )
+                    }
+                    else -> {
+                        OmniResultCard(
+                            label = "Final Compound Amount",
+                            primaryValue = "—",
+                            badgeText = freqLabel,
+                            breakdown = listOf(
+                                "Principal" to "—",
+                                "Interest Earned" to "—",
+                                "Final Amount" to "—",
+                            ),
+                        )
+                    }
+                }
 
                 Button(
+                    enabled = ciResult is SimpleOrCompoundResult.Valid,
                     onClick = {
+                        val valid = ciResult as? SimpleOrCompoundResult.Valid ?: return@Button
                         viewModel.addHistoryEntry(
-                            expression = "CI ${fmt(principal)} @ $rateInput% (${timeInput}y)",
-                            result = fmt(finalAmount),
+                            expression = "CI ${fmt(valid.principal)} @ ${SampleCatalogs.formatNumber(valid.annualRate, 2, false)}% (${SampleCatalogs.formatNumber(valid.years, 2, false)}y)",
+                            result = fmt(valid.totalAmount),
                             toolName = "Compound Interest",
                             reusableRoute = AppRoutes.FINANCE_COMPOUND_INTEREST,
                         )
@@ -620,14 +929,14 @@ fun DiscountCalculatorScreen(
 ) {
     var priceInput by remember { mutableStateOf("") }
     var discountInput by remember { mutableStateOf("") }
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    val originalPrice = (priceInput.toDoubleOrNull() ?: 0.0).coerceAtLeast(0.0)
-    val discountPct = (discountInput.toDoubleOrNull() ?: 0.0).coerceIn(0.0, 100.0)
-    val discountAmount = originalPrice * discountPct / 100.0
-    val finalPrice = (originalPrice - discountAmount).coerceAtLeast(0.0)
-    fun fmt(v: Double) = "₹" + SampleCatalogs.formatNumber(v, 2, true)
+    val discountResult = remember(priceInput, discountInput) {
+        calculateDiscount(priceInput, discountInput)
+    }
+    fun fmt(v: Double): String = formatSettingsCurrency(v, settings)
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -635,7 +944,7 @@ fun DiscountCalculatorScreen(
         topBar = {
             OmniTopBar(
                 title = "Discount Calculator",
-                subtitle = "Instant sale price & savings",
+                subtitle = "Instant sale price & savings (${settings.currencyCode})",
                 onBack = onBack,
             )
         },
@@ -659,7 +968,7 @@ fun DiscountCalculatorScreen(
                         value = priceInput,
                         onValueChange = { priceInput = it },
                         label = "Original Price",
-                        prefixText = "₹",
+                        prefixText = settings.currencySymbol(),
                         testTag = "discount_price_input",
                     )
                     Spacer(modifier = Modifier.height(12.dp))
@@ -671,12 +980,17 @@ fun DiscountCalculatorScreen(
                         testTag = "discount_pct_input",
                     )
                     Spacer(modifier = Modifier.height(10.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
                         listOf("10", "20", "25", "30", "50").forEach { pct ->
                             FilterChip(
                                 selected = discountInput == pct,
                                 onClick = { discountInput = pct },
-                                label = { Text("$pct%") },
+                                label = { Text("$pct%", maxLines = 1) },
                                 colors = FilterChipDefaults.filterChipColors(
                                     selectedContainerColor = MaterialTheme.colorScheme.primary,
                                     selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
@@ -686,23 +1000,44 @@ fun DiscountCalculatorScreen(
                     }
                 }
 
-                OmniResultCard(
-                    label = "Final Price",
-                    primaryValue = fmt(finalPrice),
-                    badgeText = "Save ${SampleCatalogs.formatNumber(discountPct, 1, false)}%",
-                    onCopy = { scope.launch { snackbarHostState.showSnackbar("Copied final price") } },
-                    breakdown = listOf(
-                        "Original Price" to fmt(originalPrice),
-                        "Discount Amount" to "− ${fmt(discountAmount)}",
-                        "You Pay" to fmt(finalPrice),
-                    ),
-                )
+                if (discountResult is DiscountCalculationResult.Error) {
+                    ErrorStateBanner(message = discountResult.message)
+                }
+
+                when (discountResult) {
+                    is DiscountCalculationResult.Valid -> {
+                        OmniResultCard(
+                            label = "Final Price",
+                            primaryValue = fmt(discountResult.finalPrice),
+                            badgeText = "Save ${SampleCatalogs.formatNumber(discountResult.discountPercent, 1, false)}%",
+                            onCopy = { scope.launch { snackbarHostState.showSnackbar("Copied final price") } },
+                            breakdown = listOf(
+                                "Original Price" to fmt(discountResult.originalPrice),
+                                "Discount Amount" to "− ${fmt(discountResult.discountAmount)}",
+                                "You Pay" to fmt(discountResult.finalPrice),
+                            ),
+                        )
+                    }
+                    else -> {
+                        OmniResultCard(
+                            label = "Final Price",
+                            primaryValue = "—",
+                            breakdown = listOf(
+                                "Original Price" to "—",
+                                "Discount Amount" to "—",
+                                "You Pay" to "—",
+                            ),
+                        )
+                    }
+                }
 
                 Button(
+                    enabled = discountResult is DiscountCalculationResult.Valid,
                     onClick = {
+                        val valid = discountResult as? DiscountCalculationResult.Valid ?: return@Button
                         viewModel.addHistoryEntry(
-                            expression = "${fmt(originalPrice)} − $discountInput% off",
-                            result = fmt(finalPrice),
+                            expression = "${fmt(valid.originalPrice)} − ${SampleCatalogs.formatNumber(valid.discountPercent, 1, false)}% off",
+                            result = fmt(valid.finalPrice),
                             toolName = "Discount",
                             reusableRoute = AppRoutes.FINANCE_DISCOUNT,
                         )

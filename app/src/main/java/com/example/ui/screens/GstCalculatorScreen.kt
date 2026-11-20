@@ -2,8 +2,8 @@ package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,14 +37,108 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.SampleCatalogs
+import com.example.model.AppSettings
 import com.example.navigation.AppRoutes
 import com.example.state.OmniCalcViewModel
+import com.example.ui.components.ErrorStateBanner
 import com.example.ui.components.OmniCard
 import com.example.ui.components.OmniInputField
 import com.example.ui.components.OmniResultCard
 import com.example.ui.components.OmniTopBar
 import kotlinx.coroutines.launch
+
+sealed class GstCalculationResult {
+    data object Empty : GstCalculationResult()
+    data class Error(val message: String) : GstCalculationResult()
+    data class Valid(
+        val taxableAmount: Double,
+        val gstAmount: Double,
+        val cgstAmount: Double,
+        val sgstAmount: Double,
+        val igstAmount: Double,
+        val totalAmount: Double,
+        val ratePercent: Double,
+        val isAddGst: Boolean,
+        val isInterState: Boolean,
+    ) : GstCalculationResult()
+}
+
+fun calculateGst(
+    amountInput: String,
+    isAddGst: Boolean,
+    selectedPreset: Int,
+    customRateInput: String,
+    isInterState: Boolean,
+): GstCalculationResult {
+    // Validate custom rate first if selected and typed
+    val gstRate = if (selectedPreset == -1) {
+        if (customRateInput.isBlank()) {
+            if (amountInput.isBlank()) return GstCalculationResult.Empty
+            return GstCalculationResult.Error("Enter a custom GST rate between 0% and 100%.")
+        }
+        val parsedRate = customRateInput.trim().toDoubleOrNull()
+        if (parsedRate == null || !parsedRate.isFinite()) {
+            return GstCalculationResult.Error("Enter a valid numeric GST percentage.")
+        }
+        if (parsedRate < 0.0 || parsedRate > 100.0) {
+            return GstCalculationResult.Error("GST rate must be between 0% and 100%.")
+        }
+        parsedRate
+    } else {
+        selectedPreset.toDouble().coerceIn(0.0, 100.0)
+    }
+
+    if (amountInput.isBlank()) {
+        return GstCalculationResult.Empty
+    }
+
+    val amount = amountInput.trim().toDoubleOrNull()
+    if (amount == null || !amount.isFinite()) {
+        return GstCalculationResult.Error("Enter a valid numeric amount.")
+    }
+    if (amount < 0.0) {
+        return GstCalculationResult.Error("Amount cannot be negative.")
+    }
+
+    val taxableAmount = if (isAddGst) {
+        amount
+    } else {
+        if (gstRate == 0.0) amount else amount * 100.0 / (100.0 + gstRate)
+    }
+    val gstAmount = if (isAddGst) {
+        amount * (gstRate / 100.0)
+    } else {
+        amount - taxableAmount
+    }
+    val totalAmount = if (isAddGst) taxableAmount + gstAmount else amount
+    val halfGst = gstAmount / 2.0
+
+    return GstCalculationResult.Valid(
+        taxableAmount = taxableAmount,
+        gstAmount = gstAmount,
+        cgstAmount = if (isInterState) 0.0 else halfGst,
+        sgstAmount = if (isInterState) 0.0 else halfGst,
+        igstAmount = if (isInterState) gstAmount else 0.0,
+        totalAmount = totalAmount,
+        ratePercent = gstRate,
+        isAddGst = isAddGst,
+        isInterState = isInterState,
+    )
+}
+
+fun formatSettingsCurrency(
+    value: Double,
+    settings: AppSettings,
+): String {
+    val symbol = settings.currencySymbol()
+    return symbol + SampleCatalogs.formatNumber(
+        value = value,
+        precision = settings.decimalPrecision,
+        useGrouping = settings.thousandsSeparator,
+    )
+}
 
 @Composable
 fun GstCalculatorScreen(
@@ -57,30 +151,22 @@ fun GstCalculatorScreen(
     var customRateInput by remember { mutableStateOf("") }
     var isInterState by remember { mutableStateOf(false) }
 
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    val amount = amountInput.toDoubleOrNull() ?: 0.0
-    val gstRate = if (selectedPreset == -1) {
-        (customRateInput.toDoubleOrNull() ?: 0.0).coerceIn(0.0, 100.0)
-    } else {
-        selectedPreset.toDouble()
+    val gstResult = remember(amountInput, isAddGst, selectedPreset, customRateInput, isInterState) {
+        calculateGst(
+            amountInput = amountInput,
+            isAddGst = isAddGst,
+            selectedPreset = selectedPreset,
+            customRateInput = customRateInput,
+            isInterState = isInterState,
+        )
     }
 
-    val originalAmount = if (isAddGst) {
-        amount
-    } else {
-        if (gstRate == 0.0) amount else amount * 100.0 / (100.0 + gstRate)
-    }
-    val gstAmount = if (isAddGst) {
-        amount * (gstRate / 100.0)
-    } else {
-        amount - originalAmount
-    }
-    val finalAmount = if (isAddGst) originalAmount + gstAmount else amount
-    val halfGst = gstAmount / 2.0
-
-    fun fmt(v: Double) = "₹" + SampleCatalogs.formatNumber(v, precision = 2, useGrouping = true)
+    fun fmt(v: Double): String = formatSettingsCurrency(v, settings)
+    val zeroMoney = fmt(0.0)
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -88,7 +174,7 @@ fun GstCalculatorScreen(
         topBar = {
             OmniTopBar(
                 title = "GST Calculator",
-                subtitle = "Indian CGST, SGST & IGST breakdown",
+                subtitle = "CGST, SGST & IGST breakdown (${settings.currencyCode})",
                 onBack = onBack,
             )
         },
@@ -140,8 +226,8 @@ fun GstCalculatorScreen(
                     OmniInputField(
                         value = amountInput,
                         onValueChange = { amountInput = it },
-                        label = if (isAddGst) "Net Amount (Excl. GST)" else "Gross Amount (Incl. GST)",
-                        prefixText = "₹",
+                        label = if (isAddGst) "Taxable / Net Amount (Excl. GST)" else "Gross Amount (Incl. GST)",
+                        prefixText = settings.currencySymbol(),
                         testTag = "gst_amount_input",
                     )
 
@@ -153,16 +239,25 @@ fun GstCalculatorScreen(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    val presets = listOf(5 to "5%", 12 to "12%", 18 to "18%", 28 to "28%", -1 to "Custom")
+                    val presets = listOf(
+                        0 to "0%",
+                        5 to "5%",
+                        12 to "12%",
+                        18 to "18%",
+                        28 to "28%",
+                        -1 to "Custom",
+                    )
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         presets.forEach { (rate, label) ->
                             FilterChip(
                                 selected = selectedPreset == rate,
                                 onClick = { selectedPreset = rate },
-                                label = { Text(label) },
+                                label = { Text(label, maxLines = 1) },
                                 colors = FilterChipDefaults.filterChipColors(
                                     selectedContainerColor = MaterialTheme.colorScheme.primary,
                                     selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
@@ -192,44 +287,102 @@ fun GstCalculatorScreen(
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
                         FilterChip(
                             selected = !isInterState,
                             onClick = { isInterState = false },
-                            label = { Text("Intra-State (CGST + SGST)") },
+                            label = { Text("Intra-State (CGST + SGST)", maxLines = 1) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+                            ),
+                            modifier = Modifier.testTag("gst_supply_intra"),
                         )
                         FilterChip(
                             selected = isInterState,
                             onClick = { isInterState = true },
-                            label = { Text("Inter-State (IGST)") },
+                            label = { Text("Inter-State (IGST)", maxLines = 1) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+                            ),
+                            modifier = Modifier.testTag("gst_supply_inter"),
                         )
                     }
                 }
 
+                if (gstResult is GstCalculationResult.Error) {
+                    ErrorStateBanner(
+                        message = gstResult.message,
+                        modifier = Modifier.testTag("gst_error_banner"),
+                    )
+                }
+
+                val activeRate = when (gstResult) {
+                    is GstCalculationResult.Valid -> gstResult.ratePercent
+                    else -> if (selectedPreset == -1) {
+                        customRateInput.toDoubleOrNull()?.coerceIn(0.0, 100.0) ?: 0.0
+                    } else {
+                        selectedPreset.toDouble()
+                    }
+                }
+                val rateLabel = SampleCatalogs.formatNumber(activeRate, 2, false)
+                val halfRateLabel = SampleCatalogs.formatNumber(activeRate / 2.0, 2, false)
+
                 // Result Card
-                OmniResultCard(
-                    label = if (isAddGst) "Final Amount (Incl. GST)" else "Original Amount (Excl. GST)",
-                    primaryValue = if (isAddGst) fmt(finalAmount) else fmt(originalAmount),
-                    badgeText = "${SampleCatalogs.formatNumber(gstRate, 2, false)}% GST",
-                    onCopy = {
-                        scope.launch { snackbarHostState.showSnackbar("Copied GST summary") }
-                    },
-                    breakdown = listOf(
-                        "Original Amount" to fmt(originalAmount),
-                        "Total GST (${SampleCatalogs.formatNumber(gstRate, 2, false)}%)" to fmt(gstAmount),
-                        "CGST (${SampleCatalogs.formatNumber(gstRate / 2.0, 2, false)}%)" to if (isInterState) "₹0" else fmt(halfGst),
-                        "SGST (${SampleCatalogs.formatNumber(gstRate / 2.0, 2, false)}%)" to if (isInterState) "₹0" else fmt(halfGst),
-                        "IGST (${SampleCatalogs.formatNumber(gstRate, 2, false)}%)" to if (isInterState) fmt(gstAmount) else "₹0",
-                        "Final Payable Amount" to fmt(finalAmount),
-                    ),
-                )
+                when (gstResult) {
+                    is GstCalculationResult.Valid -> {
+                        val primaryResult = if (isAddGst) fmt(gstResult.totalAmount) else fmt(gstResult.taxableAmount)
+                        OmniResultCard(
+                            label = if (isAddGst) "Final Amount (Incl. GST)" else "Taxable Amount (Excl. GST)",
+                            primaryValue = primaryResult,
+                            badgeText = "$rateLabel% GST",
+                            onCopy = {
+                                scope.launch { snackbarHostState.showSnackbar("Copied GST summary") }
+                            },
+                            breakdown = listOf(
+                                "Taxable Amount" to fmt(gstResult.taxableAmount),
+                                "Total GST ($rateLabel%)" to fmt(gstResult.gstAmount),
+                                "CGST ($halfRateLabel%)" to if (isInterState) zeroMoney else fmt(gstResult.cgstAmount),
+                                "SGST ($halfRateLabel%)" to if (isInterState) zeroMoney else fmt(gstResult.sgstAmount),
+                                "IGST ($rateLabel%)" to if (isInterState) fmt(gstResult.igstAmount) else zeroMoney,
+                                "Final Payable Amount" to fmt(gstResult.totalAmount),
+                            ),
+                            modifier = Modifier.testTag("gst_result_card"),
+                        )
+                    }
+                    else -> {
+                        OmniResultCard(
+                            label = if (isAddGst) "Final Amount (Incl. GST)" else "Taxable Amount (Excl. GST)",
+                            primaryValue = "—",
+                            badgeText = "$rateLabel% GST",
+                            breakdown = listOf(
+                                "Taxable Amount" to "—",
+                                "Total GST ($rateLabel%)" to "—",
+                                "CGST ($halfRateLabel%)" to "—",
+                                "SGST ($halfRateLabel%)" to "—",
+                                "IGST ($rateLabel%)" to "—",
+                                "Final Payable Amount" to "—",
+                            ),
+                            modifier = Modifier.testTag("gst_result_card"),
+                        )
+                    }
+                }
 
                 Button(
+                    enabled = gstResult is GstCalculationResult.Valid,
                     onClick = {
+                        val valid = gstResult as? GstCalculationResult.Valid ?: return@Button
                         val sign = if (isAddGst) "+" else "−"
+                        val inputAmount = amountInput.trim().toDoubleOrNull() ?: valid.taxableAmount
                         viewModel.addHistoryEntry(
-                            expression = "${fmt(amount)} $sign ${SampleCatalogs.formatNumber(gstRate, 2, false)}% GST",
-                            result = if (isAddGst) fmt(finalAmount) else fmt(originalAmount),
+                            expression = "${fmt(inputAmount)} $sign $rateLabel% GST",
+                            result = if (isAddGst) fmt(valid.totalAmount) else fmt(valid.taxableAmount),
                             toolName = "GST",
                             reusableRoute = AppRoutes.GST_CALCULATOR,
                         )

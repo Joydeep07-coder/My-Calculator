@@ -44,10 +44,10 @@ object SampleCatalogs {
         ToolItem(
             id = "gst_calc",
             title = "GST Calculator",
-            subtitle = "Indian CGST, SGST & IGST presets",
+            subtitle = "CGST, SGST & IGST presets (0–28%)",
             category = ToolCategory.FINANCE,
             route = AppRoutes.GST_CALCULATOR,
-            badgeText = "5-28%",
+            badgeText = "0-28%",
         ),
         ToolItem(
             id = "finance_hub",
@@ -98,7 +98,7 @@ object SampleCatalogs {
             subtitle = "INR, USD, EUR, GBP, JPY & more",
             category = ToolCategory.CONVERTERS,
             route = AppRoutes.CURRENCY_CONVERTER,
-            badgeText = "Sample",
+            badgeText = "LIVE",
         ),
         ToolItem(
             id = "age_calc",
@@ -191,9 +191,9 @@ object SampleCatalogs {
         ),
         UnitCategory.SPEED to listOf(
             UnitDef("mps", "Meter / sec", "m/s", 1.0),
-            UnitDef("kmh", "Kilometer / hr", "km/h", 0.277777778),
+            UnitDef("kmh", "Kilometer / hr", "km/h", 1.0 / 3.6),
             UnitDef("mph", "Mile / hr", "mph", 0.44704),
-            UnitDef("knot", "Knot", "kn", 0.514444444),
+            UnitDef("knot", "Knot", "kn", 1852.0 / 3600.0),
         ),
         UnitCategory.TIME to listOf(
             UnitDef("s", "Second", "s", 1.0),
@@ -286,57 +286,304 @@ object SampleCatalogs {
                 repeat(precision) { append("#") }
             }
         }
-        return DecimalFormat(pattern).format(clean)
+        val symbols = java.text.DecimalFormatSymbols(java.util.Locale.US)
+        return DecimalFormat(pattern, symbols).format(clean)
+    }
+
+    /**
+     * Formats numbers while preserving significant digits for small non-zero values
+     * (e.g. unit conversions like mg -> kg, mL -> m³, or tiny currency amounts) instead
+     * of rounding them down to "0".
+     */
+    fun formatFlexibleNumber(
+        value: Double,
+        preferredPrecision: Int = 6,
+        useGrouping: Boolean = true,
+        minFixedDecimals: Int = 0,
+    ): String {
+        if (value.isNaN() || value.isInfinite()) return "Error"
+        if (value == 0.0) {
+            return if (minFixedDecimals > 0) {
+                val symbols = java.text.DecimalFormatSymbols(java.util.Locale.US)
+                val pattern = "0." + "0".repeat(minFixedDecimals.coerceIn(1, 10))
+                DecimalFormat(pattern, symbols).format(0.0)
+            } else {
+                "0"
+            }
+        }
+
+        val absVal = abs(value)
+        val symbols = java.text.DecimalFormatSymbols(java.util.Locale.US)
+        if (absVal < 1e-6) {
+            val sigDecimals = preferredPrecision.coerceIn(2, 6)
+            val expPattern = "0." + "#".repeat(sigDecimals) + "E0"
+            return DecimalFormat(expPattern, symbols).format(value).replace("E", "e")
+        }
+
+        val leadingZeros = if (absVal < 1.0) {
+            kotlin.math.ceil(-log10(absVal)).toInt().coerceAtLeast(1) - 1
+        } else {
+            0
+        }
+        val effectivePrecision = maxOf(
+            preferredPrecision.coerceIn(0, 10),
+            minFixedDecimals.coerceIn(0, 10),
+            if (absVal < 1.0) (leadingZeros + 4).coerceAtMost(10) else 0,
+        )
+        val pattern = buildString {
+            append(if (useGrouping) "#,##0" else "###0")
+            if (effectivePrecision > 0) {
+                append(".")
+                val requiredZeros = if (absVal >= 1.0 || absVal >= 10.0.pow(-minFixedDecimals)) {
+                    minFixedDecimals.coerceAtMost(effectivePrecision)
+                } else {
+                    0
+                }
+                repeat(requiredZeros) { append("0") }
+                repeat(effectivePrecision - requiredZeros) { append("#") }
+            }
+        }
+        return DecimalFormat(pattern, symbols).format(value)
     }
 }
 
 /**
- * Clean lightweight UI-preview expression evaluator for Standard, Scientific, and Graph Plotter.
- * Handles +, -, ×, ÷, %, ^, parentheses, sin/cos/tan/asin/acos/atan/log/ln/sqrt/abs/fact, π, e, and variable x.
+ * Mathematical expression evaluator for Standard, Scientific, and Graph Plotter.
+ *
+ * Precedence (lowest -> highest):
+ * 1. Binary +, -
+ * 2. Binary *, /, and implicit multiplication (e.g. 2(3+4), 3π, 2x, 2sin(30))
+ * 3. Unary +, - (so -x^2 = -(x^2))
+ * 4. Power ^ (right-associative; exponent allows unary +/- e.g. 2^-3)
+ * 5. Postfix !, %
+ * 6. Primary: numbers, constants (π, e), variable (x), functions, √, and (...)
  */
 object SimpleExprHelper {
 
-    fun evaluate(rawExpr: String, isDegrees: Boolean = true, xValue: Double? = null): Double? {
-        val cleaned = rawExpr
-            .replace("×", "*")
-            .replace("÷", "/")
-            .replace("−", "-")
-            .replace("π", PI.toString())
-            .replace("√(", "sqrt(")
-            .replace("√", "sqrt")
-            .replace("sin⁻¹(", "asin(")
-            .replace("cos⁻¹(", "acos(")
-            .replace("tan⁻¹(", "atan(")
-            .replace(" ", "")
-        if (cleaned.isBlank()) return null
+    sealed interface CompiledExpr {
+        fun evaluate(isDegrees: Boolean = true, xValue: Double? = null): Double?
+    }
 
-        return try {
-            val parser = Parser(cleaned, isDegrees, xValue)
-            val result = parser.parseExpression()
-            if (parser.pos < cleaned.length) null else result
+    sealed class CompileResult {
+        data class Success(val expr: CompiledExpr) : CompileResult()
+        data class Error(val message: String) : CompileResult()
+    }
+
+    private sealed class AstNode : CompiledExpr {
+        override fun evaluate(isDegrees: Boolean, xValue: Double?): Double? = try {
+            val result = eval(isDegrees, xValue)
+            if (!result.isFinite()) null else if (result == 0.0) 0.0 else result
         } catch (_: Exception) {
             null
+        }
+
+        abstract fun eval(isDegrees: Boolean, xValue: Double?): Double
+    }
+
+    private class ConstNode(private val value: Double) : AstNode() {
+        override fun eval(isDegrees: Boolean, xValue: Double?): Double = value
+    }
+
+    private object VarXNode : AstNode() {
+        override fun eval(isDegrees: Boolean, xValue: Double?): Double =
+            xValue ?: throw ArithmeticException("Variable x has no value")
+    }
+
+    private class UnaryNegNode(private val operand: AstNode) : AstNode() {
+        override fun eval(isDegrees: Boolean, xValue: Double?): Double = -operand.eval(isDegrees, xValue)
+    }
+
+    private class BinaryNode(
+        private val op: Char,
+        private val left: AstNode,
+        private val right: AstNode,
+    ) : AstNode() {
+        override fun eval(isDegrees: Boolean, xValue: Double?): Double {
+            val l = left.eval(isDegrees, xValue)
+            val r = right.eval(isDegrees, xValue)
+            return when (op) {
+                '+' -> l + r
+                '-' -> l - r
+                '*' -> l * r
+                '/' -> {
+                    if (r == 0.0) throw ArithmeticException("Div by zero")
+                    l / r
+                }
+                '^' -> {
+                    val res = l.pow(r)
+                    if (!res.isFinite()) throw ArithmeticException("Invalid power")
+                    res
+                }
+                else -> throw IllegalStateException("Unknown op: $op")
+            }
+        }
+    }
+
+    private class FactorialNode(private val operand: AstNode) : AstNode() {
+        override fun eval(isDegrees: Boolean, xValue: Double?): Double {
+            val x = operand.eval(isDegrees, xValue)
+            if (x < 0.0 || !x.isFinite() || abs(x - kotlin.math.round(x)) > 1e-9) {
+                throw ArithmeticException("Factorial domain error")
+            }
+            val n = kotlin.math.round(x).toInt()
+            if (n > 170) throw ArithmeticException("Factorial overflow")
+            var fact = 1.0
+            for (i in 2..n) fact *= i
+            return fact
+        }
+    }
+
+    private class PercentNode(private val operand: AstNode) : AstNode() {
+        override fun eval(isDegrees: Boolean, xValue: Double?): Double = operand.eval(isDegrees, xValue) / 100.0
+    }
+
+    private class SqrtNode(private val operand: AstNode) : AstNode() {
+        override fun eval(isDegrees: Boolean, xValue: Double?): Double {
+            val arg = operand.eval(isDegrees, xValue)
+            if (arg < 0.0) throw ArithmeticException("Negative sqrt")
+            return sqrt(arg)
+        }
+    }
+
+    private class FnNode(private val name: String, private val argNode: AstNode) : AstNode() {
+        override fun eval(isDegrees: Boolean, xValue: Double?): Double {
+            val arg = argNode.eval(isDegrees, xValue)
+            val rad = if (isDegrees) Math.toRadians(arg) else arg
+            return when (name) {
+                "sin" -> {
+                    if (isDegrees) {
+                        val mod = ((arg % 360.0) + 360.0) % 360.0
+                        when {
+                            abs(mod) < 1e-12 || abs(mod - 180.0) < 1e-12 || abs(mod - 360.0) < 1e-12 -> 0.0
+                            abs(mod - 90.0) < 1e-12 -> 1.0
+                            abs(mod - 270.0) < 1e-12 -> -1.0
+                            else -> sin(rad)
+                        }
+                    } else {
+                        sin(rad)
+                    }
+                }
+                "cos" -> {
+                    if (isDegrees) {
+                        val mod = ((arg % 360.0) + 360.0) % 360.0
+                        when {
+                            abs(mod - 90.0) < 1e-12 || abs(mod - 270.0) < 1e-12 -> 0.0
+                            abs(mod) < 1e-12 || abs(mod - 360.0) < 1e-12 -> 1.0
+                            abs(mod - 180.0) < 1e-12 -> -1.0
+                            else -> cos(rad)
+                        }
+                    } else {
+                        cos(rad)
+                    }
+                }
+                "tan" -> {
+                    if (isDegrees) {
+                        val mod = ((arg % 360.0) + 360.0) % 360.0
+                        if (abs(mod - 90.0) < 1e-12 || abs(mod - 270.0) < 1e-12) {
+                            throw ArithmeticException("tan undefined at 90/270 deg")
+                        }
+                        if (abs(mod) < 1e-12 || abs(mod - 180.0) < 1e-12 || abs(mod - 360.0) < 1e-12) {
+                            0.0
+                        } else {
+                            tan(rad)
+                        }
+                    } else {
+                        if (abs(cos(rad)) < 1e-12) {
+                            throw ArithmeticException("tan undefined")
+                        }
+                        tan(rad)
+                    }
+                }
+                "asin" -> {
+                    if (arg < -1.0 || arg > 1.0) throw ArithmeticException("asin domain")
+                    if (isDegrees) Math.toDegrees(asin(arg)) else asin(arg)
+                }
+                "acos" -> {
+                    if (arg < -1.0 || arg > 1.0) throw ArithmeticException("acos domain")
+                    if (isDegrees) Math.toDegrees(acos(arg)) else acos(arg)
+                }
+                "atan" -> if (isDegrees) Math.toDegrees(atan(arg)) else atan(arg)
+                "sqrt" -> {
+                    if (arg < 0.0) throw ArithmeticException("Negative sqrt")
+                    sqrt(arg)
+                }
+                "log" -> {
+                    if (arg <= 0.0) throw ArithmeticException("Non-positive log")
+                    log10(arg)
+                }
+                "ln" -> {
+                    if (arg <= 0.0) throw ArithmeticException("Non-positive ln")
+                    ln(arg)
+                }
+                "exp" -> {
+                    val res = kotlin.math.exp(arg)
+                    if (!res.isFinite()) throw ArithmeticException("exp overflow")
+                    res
+                }
+                "abs" -> abs(arg)
+                else -> throw IllegalArgumentException("Unknown function: '$name'")
+            }
+        }
+    }
+
+    private fun cleanExpression(rawExpr: String): String = rawExpr
+        .replace("×", "*")
+        .replace("÷", "/")
+        .replace("−", "-")
+        .replace("sin⁻¹", "asin")
+        .replace("cos⁻¹", "acos")
+        .replace("tan⁻¹", "atan")
+        .replace(" ", "")
+
+    fun compile(rawExpr: String, allowVariableX: Boolean = true): CompileResult {
+        val cleaned = cleanExpression(rawExpr)
+        if (cleaned.isBlank()) return CompileResult.Error("Expression cannot be empty.")
+
+        return try {
+            val parser = Parser(cleaned, allowVariableX)
+            val ast = parser.parseExpression()
+            if (parser.pos < cleaned.length) {
+                CompileResult.Error("Unexpected '${cleaned[parser.pos]}' in expression.")
+            } else {
+                CompileResult.Success(ast)
+            }
+        } catch (e: IllegalArgumentException) {
+            CompileResult.Error(e.message ?: "Invalid expression syntax.")
+        } catch (e: Exception) {
+            CompileResult.Error(e.message ?: "Invalid expression.")
+        }
+    }
+
+    fun validateExpression(rawExpr: String, allowVariableX: Boolean = true): String? =
+        when (val res = compile(rawExpr, allowVariableX)) {
+            is CompileResult.Success -> null
+            is CompileResult.Error -> res.message
+        }
+
+    fun evaluate(rawExpr: String, isDegrees: Boolean = true, xValue: Double? = null): Double? {
+        return when (val compiled = compile(rawExpr, allowVariableX = xValue != null)) {
+            is CompileResult.Success -> compiled.expr.evaluate(isDegrees = isDegrees, xValue = xValue)
+            is CompileResult.Error -> null
         }
     }
 
     private class Parser(
         private val str: String,
-        private val isDegrees: Boolean,
-        private val xValue: Double?,
+        private val allowVariableX: Boolean,
     ) {
         var pos = 0
 
-        fun parseExpression(): Double {
+        fun parseExpression(): AstNode {
             var x = parseTerm()
             while (pos < str.length) {
                 when (str[pos]) {
                     '+' -> {
                         pos++
-                        x += parseTerm()
+                        x = BinaryNode('+', x, parseTerm())
                     }
                     '-' -> {
                         pos++
-                        x -= parseTerm()
+                        x = BinaryNode('-', x, parseTerm())
                     }
                     else -> return x
                 }
@@ -344,105 +591,154 @@ object SimpleExprHelper {
             return x
         }
 
-        private fun parseTerm(): Double {
-            var x = parsePower()
-            while (pos < str.length) {
-                when (str[pos]) {
-                    '*' -> {
-                        pos++
-                        x *= parsePower()
-                    }
-                    '/' -> {
-                        pos++
-                        val d = parsePower()
-                        if (d == 0.0) throw ArithmeticException("Div by zero")
-                        x /= d
-                    }
-                    '%' -> {
-                        pos++
-                        x /= 100.0
-                    }
-                    else -> return x
-                }
-            }
-            return x
+        private fun canStartImplicitFactor(): Boolean {
+            if (pos >= str.length) return false
+            val c = str[pos]
+            return c == '(' || c == 'π' || c == '√' || c.isLetter() || c.isDigit() || c == '.'
         }
 
-        private fun parsePower(): Double {
+        private fun parseTerm(): AstNode {
             var x = parseUnary()
-            if (pos < str.length && str[pos] == '^') {
-                pos++
-                x = x.pow(parsePower())
+            while (pos < str.length) {
+                when {
+                    str[pos] == '*' -> {
+                        pos++
+                        x = BinaryNode('*', x, parseUnary())
+                    }
+                    str[pos] == '/' -> {
+                        pos++
+                        x = BinaryNode('/', x, parseUnary())
+                    }
+                    canStartImplicitFactor() -> {
+                        x = BinaryNode('*', x, parseUnary())
+                    }
+                    else -> return x
+                }
             }
             return x
         }
 
-        private fun parseUnary(): Double {
+        private fun parseUnary(): AstNode {
             if (pos < str.length && str[pos] == '+') {
                 pos++
                 return parseUnary()
             }
             if (pos < str.length && str[pos] == '-') {
                 pos++
-                return -parseUnary()
+                return UnaryNegNode(parseUnary())
             }
-            return parsePostfix()
+            return parsePower()
         }
 
-        private fun parsePostfix(): Double {
-            var x = parsePrimary()
-            while (pos < str.length && str[pos] == '!') {
+        private fun parsePower(): AstNode {
+            val base = parsePostfix()
+            if (pos < str.length && str[pos] == '^') {
                 pos++
-                val n = x.toInt().coerceIn(0, 20)
-                var fact = 1.0
-                for (i in 2..n) fact *= i
-                x = fact
+                val exponent = parseUnary()
+                return BinaryNode('^', base, exponent)
+            }
+            return base
+        }
+
+        private fun parsePostfix(): AstNode {
+            var x = parsePrimary()
+            while (pos < str.length) {
+                when (str[pos]) {
+                    '!' -> {
+                        pos++
+                        x = FactorialNode(x)
+                    }
+                    '%' -> {
+                        pos++
+                        x = PercentNode(x)
+                    }
+                    else -> return x
+                }
             }
             return x
         }
 
-        private fun parsePrimary(): Double {
-            if (pos < str.length && str[pos] == '(') {
+        private fun parsePrimary(): AstNode {
+            if (pos >= str.length) throw IllegalArgumentException("Incomplete expression.")
+
+            val ch = str[pos]
+            if (ch == '(') {
                 pos++
                 val x = parseExpression()
-                if (pos < str.length && str[pos] == ')') pos++
+                if (pos >= str.length || str[pos] != ')') {
+                    throw IllegalArgumentException("Missing closing parenthesis ')'.")
+                }
+                pos++
                 return x
             }
-            if (pos < str.length && (str[pos].isDigit() || str[pos] == '.')) {
-                val start = pos
-                while (pos < str.length && (str[pos].isDigit() || str[pos] == '.')) pos++
-                return str.substring(start, pos).toDouble()
+
+            if (ch == 'π') {
+                pos++
+                return ConstNode(PI)
             }
-            if (pos < str.length && str[pos].isLetter()) {
+
+            if (ch == '√') {
+                pos++
+                return SqrtNode(parsePrimary())
+            }
+
+            if (ch.isDigit() || ch == '.') {
+                val start = pos
+                var dotCount = 0
+                var digitCount = 0
+                while (pos < str.length && (str[pos].isDigit() || str[pos] == '.')) {
+                    if (str[pos] == '.') dotCount++ else digitCount++
+                    pos++
+                }
+                if (dotCount > 1 || digitCount == 0) {
+                    throw IllegalArgumentException("Invalid number format.")
+                }
+                val num = str.substring(start, pos).toDoubleOrNull()
+                    ?: throw IllegalArgumentException("Invalid number format.")
+                return ConstNode(num)
+            }
+
+            if (ch.isLetter()) {
                 val start = pos
                 while (pos < str.length && str[pos].isLetter()) pos++
                 val name = str.substring(start, pos)
-                if (name == "e") return kotlin.math.E
-                if (name == "x" && xValue != null) return xValue
-                val arg = if (pos < str.length && str[pos] == '(') {
-                    pos++
-                    val v = parseExpression()
-                    if (pos < str.length && str[pos] == ')') pos++
-                    v
-                } else {
-                    parsePrimary()
+                if (name == "e") return ConstNode(kotlin.math.E)
+                if (name == "pi") return ConstNode(PI)
+                if (name == "x") {
+                    if (!allowVariableX) {
+                        throw IllegalArgumentException("Variable 'x' is not allowed here.")
+                    }
+                    return VarXNode
                 }
-                val rad = if (isDegrees) Math.toRadians(arg) else arg
-                return when (name) {
-                    "sin" -> sin(rad)
-                    "cos" -> cos(rad)
-                    "tan" -> tan(rad)
-                    "asin" -> if (isDegrees) Math.toDegrees(asin(arg)) else asin(arg)
-                    "acos" -> if (isDegrees) Math.toDegrees(acos(arg)) else acos(arg)
-                    "atan" -> if (isDegrees) Math.toDegrees(atan(arg)) else atan(arg)
-                    "sqrt" -> sqrt(arg)
-                    "log" -> log10(arg)
-                    "ln" -> ln(arg)
-                    "abs" -> abs(arg)
-                    else -> throw IllegalArgumentException("Unknown fn: $name")
+
+                if (name !in KNOWN_FUNCTIONS) {
+                    throw IllegalArgumentException("Unknown function or symbol: '$name'.")
                 }
+                val arg = parseFunctionArg()
+                return FnNode(name, arg)
             }
-            throw IllegalArgumentException("Unexpected char at $pos")
+
+            throw IllegalArgumentException("Unexpected character '$ch'.")
+        }
+
+        private fun parseFunctionArg(): AstNode {
+            return if (pos < str.length && str[pos] == '(') {
+                pos++
+                val v = parseExpression()
+                if (pos >= str.length || str[pos] != ')') {
+                    throw IllegalArgumentException("Missing closing parenthesis ')'.")
+                }
+                pos++
+                v
+            } else {
+                parsePrimary()
+            }
         }
     }
+
+    private val KNOWN_FUNCTIONS = setOf(
+        "sin", "cos", "tan",
+        "asin", "acos", "atan",
+        "sqrt", "log", "ln", "exp", "abs",
+    )
 }

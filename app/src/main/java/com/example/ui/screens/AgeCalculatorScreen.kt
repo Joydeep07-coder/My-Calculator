@@ -29,13 +29,13 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SelectableDates
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -45,6 +45,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.ui.components.ErrorStateBanner
 import com.example.ui.components.OmniCard
 import com.example.ui.components.OmniTopBar
 import com.example.ui.theme.AccentPink
@@ -53,7 +54,8 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.TimeUnit
+import java.util.TimeZone
+import kotlin.math.min
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -62,13 +64,22 @@ fun AgeCalculatorScreen(
 ) {
     var selectedDobMillis by remember { mutableStateOf<Long?>(null) }
     var calculatedDobMillis by remember { mutableStateOf<Long?>(null) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
     var showDatePicker by remember { mutableStateOf(false) }
 
-    val dateFormatter = remember { SimpleDateFormat("dd MMM yyyy", Locale.getDefault()) }
-    val weekdayFormatter = remember { SimpleDateFormat("EEEE", Locale.getDefault()) }
+    val dateFormatter = remember {
+        SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }
+    }
+    val weekdayFormatter = remember {
+        SimpleDateFormat("EEEE", Locale.getDefault()).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }
+    }
 
     val ageBreakdown = remember(calculatedDobMillis) {
-        calculatedDobMillis?.let { computeAgeDetails(it) }
+        calculatedDobMillis?.let { computeAgeDetailsFromUtcMillis(it) }
     }
 
     Scaffold(
@@ -146,8 +157,22 @@ fun AgeCalculatorScreen(
 
                     Spacer(modifier = Modifier.height(14.dp))
                     Button(
-                        onClick = { calculatedDobMillis = selectedDobMillis },
-                        enabled = selectedDobMillis != null,
+                        onClick = {
+                            val dob = selectedDobMillis
+                            if (dob == null) {
+                                errorMessage = "Please select your date of birth first."
+                                calculatedDobMillis = null
+                            } else {
+                                val details = computeAgeDetailsFromUtcMillis(dob)
+                                if (details == null) {
+                                    errorMessage = "Birth date cannot be in the future."
+                                    calculatedDobMillis = null
+                                } else {
+                                    errorMessage = null
+                                    calculatedDobMillis = dob
+                                }
+                            }
+                        },
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -156,6 +181,13 @@ fun AgeCalculatorScreen(
                     ) {
                         Text("Calculate Age")
                     }
+                }
+
+                if (!errorMessage.isNullOrBlank()) {
+                    ErrorStateBanner(
+                        message = errorMessage!!,
+                        modifier = Modifier.testTag("age_error_banner"),
+                    )
                 }
 
                 if (ageBreakdown == null) {
@@ -196,17 +228,23 @@ fun AgeCalculatorScreen(
                                 AgeUnitBlock(
                                     value = ageBreakdown.years.toString(),
                                     label = "Years",
-                                    modifier = Modifier.weight(1f),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("age_years_value"),
                                 )
                                 AgeUnitBlock(
                                     value = ageBreakdown.months.toString(),
                                     label = "Months",
-                                    modifier = Modifier.weight(1f),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("age_months_value"),
                                 )
                                 AgeUnitBlock(
                                     value = ageBreakdown.days.toString(),
                                     label = "Days",
-                                    modifier = Modifier.weight(1f),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("age_days_value"),
                                 )
                             }
                         }
@@ -264,7 +302,7 @@ fun AgeCalculatorScreen(
                                     color = MaterialTheme.colorScheme.onSurface,
                                 )
                                 Text(
-                                    text = "${dateFormatter.format(Date(ageBreakdown.nextBirthdayMillis))} (${weekdayFormatter.format(Date(ageBreakdown.nextBirthdayMillis))})",
+                                    text = "${dateFormatter.format(Date(ageBreakdown.nextBirthdayUtcMillis))} (${weekdayFormatter.format(Date(ageBreakdown.nextBirthdayUtcMillis))})",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -284,6 +322,7 @@ fun AgeCalculatorScreen(
                                             fontWeight = FontWeight.Bold,
                                         ),
                                         color = AccentPink,
+                                        modifier = Modifier.testTag("age_next_birthday_days"),
                                     )
                                     Text(
                                         text = "days left",
@@ -300,15 +339,35 @@ fun AgeCalculatorScreen(
     }
 
     if (showDatePicker) {
-        val datePickerState = rememberDatePickerState(initialSelectedDateMillis = selectedDobMillis)
+        val todayLocal = currentLocalCalendarDate()
+        val todayUtcMillis = todayLocal.toUtcMillis()
+        val datePickerState = rememberDatePickerState(
+            initialSelectedDateMillis = selectedDobMillis ?: todayUtcMillis,
+            selectableDates = object : SelectableDates {
+                override fun isSelectableDate(utcTimeMillis: Long): Boolean {
+                    return utcTimeMillis <= todayUtcMillis
+                }
+
+                override fun isSelectableYear(year: Int): Boolean {
+                    return year <= todayLocal.year
+                }
+            },
+        )
         DatePickerDialog(
             onDismissRequest = { showDatePicker = false },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        datePickerState.selectedDateMillis?.let {
-                            selectedDobMillis = it
-                            calculatedDobMillis = it
+                        datePickerState.selectedDateMillis?.let { picked ->
+                            selectedDobMillis = picked
+                            val details = computeAgeDetailsFromUtcMillis(picked)
+                            if (details == null) {
+                                errorMessage = "Birth date cannot be in the future."
+                                calculatedDobMillis = null
+                            } else {
+                                errorMessage = null
+                                calculatedDobMillis = picked
+                            }
                         }
                         showDatePicker = false
                     }
@@ -386,74 +445,152 @@ private fun SummaryMetricCard(
     }
 }
 
-private data class AgeDetails(
+data class CalendarDate(
+    val year: Int,
+    val month: Int, // 1..12
+    val day: Int,   // 1..31
+) : Comparable<CalendarDate> {
+
+    override fun compareTo(other: CalendarDate): Int {
+        if (year != other.year) return year.compareTo(other.year)
+        if (month != other.month) return month.compareTo(other.month)
+        return day.compareTo(other.day)
+    }
+
+    fun toUtcMillis(): Long {
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+            clear()
+            set(Calendar.YEAR, year)
+            set(Calendar.MONTH, month - 1)
+            set(Calendar.DAY_OF_MONTH, day)
+        }
+        return cal.timeInMillis
+    }
+
+    companion object {
+        fun fromUtcMillis(utcMillis: Long): CalendarDate {
+            val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+                timeInMillis = utcMillis
+            }
+            return CalendarDate(
+                year = cal.get(Calendar.YEAR),
+                month = cal.get(Calendar.MONTH) + 1,
+                day = cal.get(Calendar.DAY_OF_MONTH),
+            )
+        }
+    }
+}
+
+data class AgeDetails(
     val years: Int,
     val months: Int,
     val days: Int,
     val totalMonths: Long,
     val totalWeeks: Long,
     val totalDays: Long,
-    val nextBirthdayMillis: Long,
+    val nextBirthdayUtcMillis: Long,
     val daysUntilNextBirthday: Long,
 )
 
-private fun computeAgeDetails(dobMillis: Long): AgeDetails {
-    val dob = Calendar.getInstance().apply { timeInMillis = dobMillis }
-    val today = Calendar.getInstance()
+fun isLeapYear(year: Int): Boolean =
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 
-    if (dob.after(today)) {
-        return AgeDetails(0, 0, 0, 0, 0, 0, dobMillis, 0)
-    }
+fun daysInMonth(year: Int, month: Int): Int = when (month) {
+    1, 3, 5, 7, 8, 10, 12 -> 31
+    4, 6, 9, 11 -> 30
+    2 -> if (isLeapYear(year)) 29 else 28
+    else -> 0
+}
 
-    var years = today.get(Calendar.YEAR) - dob.get(Calendar.YEAR)
-    var months = today.get(Calendar.MONTH) - dob.get(Calendar.MONTH)
-    var days = today.get(Calendar.DAY_OF_MONTH) - dob.get(Calendar.DAY_OF_MONTH)
+fun isValidCalendarDate(date: CalendarDate): Boolean {
+    if (date.month !in 1..12) return false
+    val maxDay = daysInMonth(date.year, date.month)
+    return date.day in 1..maxDay
+}
 
-    if (days < 0) {
-        months -= 1
-        val prevMonth = (today.clone() as Calendar).apply { add(Calendar.MONTH, -1) }
-        days += prevMonth.getActualMaximum(Calendar.DAY_OF_MONTH)
-    }
-    if (months < 0) {
-        years -= 1
-        months += 12
-    }
-
-    val diffMillis = (today.timeInMillis - dob.timeInMillis).coerceAtLeast(0L)
-    val totalDays = TimeUnit.MILLISECONDS.toDays(diffMillis)
-    val totalWeeks = totalDays / 7L
-    val totalMonths = years * 12L + months
-
-    val nextBday = Calendar.getInstance().apply {
-        set(Calendar.YEAR, today.get(Calendar.YEAR))
-        set(Calendar.MONTH, dob.get(Calendar.MONTH))
-        set(Calendar.DAY_OF_MONTH, dob.get(Calendar.DAY_OF_MONTH))
-        set(Calendar.HOUR_OF_DAY, 0)
-        set(Calendar.MINUTE, 0)
-        set(Calendar.SECOND, 0)
-        set(Calendar.MILLISECOND, 0)
-    }
-    val todayStart = Calendar.getInstance().apply {
-        set(Calendar.HOUR_OF_DAY, 0)
-        set(Calendar.MINUTE, 0)
-        set(Calendar.SECOND, 0)
-        set(Calendar.MILLISECOND, 0)
-    }
-    if (nextBday.before(todayStart)) {
-        nextBday.add(Calendar.YEAR, 1)
-    }
-    val daysUntil = TimeUnit.MILLISECONDS.toDays(
-        (nextBday.timeInMillis - todayStart.timeInMillis).coerceAtLeast(0L)
+private fun currentLocalCalendarDate(): CalendarDate {
+    val now = Calendar.getInstance()
+    return CalendarDate(
+        year = now.get(Calendar.YEAR),
+        month = now.get(Calendar.MONTH) + 1,
+        day = now.get(Calendar.DAY_OF_MONTH),
     )
+}
+
+/**
+ * Pure Gregorian epoch day count (Howard Hinnant algorithm) — timezone/DST independent.
+ */
+private fun toEpochDay(date: CalendarDate): Long {
+    val y = date.year.toLong() - if (date.month <= 2) 1L else 0L
+    val era = (if (y >= 0) y else y - 399L) / 400L
+    val yoe = y - era * 400L
+    val m = date.month.toLong()
+    val doy = (153L * (m + if (m > 2) -3L else 9L) + 2L) / 5L + date.day.toLong() - 1L
+    val doe = yoe * 365L + yoe / 4L - yoe / 100L + doy
+    return era * 146097L + doe - 719468L
+}
+
+private fun addMonthsClamped(date: CalendarDate, monthsToAdd: Int): CalendarDate {
+    val zeroBasedMonth = (date.month - 1) + monthsToAdd
+    val targetYear = date.year + Math.floorDiv(zeroBasedMonth, 12)
+    val targetMonth = Math.floorMod(zeroBasedMonth, 12) + 1
+    val targetDay = min(date.day, daysInMonth(targetYear, targetMonth))
+    return CalendarDate(targetYear, targetMonth, targetDay)
+}
+
+fun computeAgeDetailsFromUtcMillis(
+    dobUtcMillis: Long,
+    today: CalendarDate = currentLocalCalendarDate(),
+): AgeDetails? = computeAgeDetails(CalendarDate.fromUtcMillis(dobUtcMillis), today)
+
+fun computeAgeDetails(
+    dob: CalendarDate,
+    today: CalendarDate = currentLocalCalendarDate(),
+): AgeDetails? {
+    if (!isValidCalendarDate(dob) || !isValidCalendarDate(today)) return null
+    if (dob > today) return null
+
+    var totalMonths = (today.year - dob.year) * 12 + (today.month - dob.month)
+    var days = today.day - dob.day
+    if (totalMonths > 0 && days < 0) {
+        totalMonths -= 1
+        val anchor = addMonthsClamped(dob, totalMonths)
+        days = (toEpochDay(today) - toEpochDay(anchor)).toInt()
+    }
+
+    val years = totalMonths / 12
+    val months = totalMonths % 12
+
+    val todayEpoch = toEpochDay(today)
+    val dobEpoch = toEpochDay(dob)
+    val totalDays = (todayEpoch - dobEpoch).coerceAtLeast(0L)
+    val totalWeeks = totalDays / 7L
+
+    val candidateThisYear = CalendarDate(
+        year = today.year,
+        month = dob.month,
+        day = min(dob.day, daysInMonth(today.year, dob.month)),
+    )
+    val nextBirthdayDate = if (candidateThisYear < today) {
+        val nextYear = today.year + 1
+        CalendarDate(
+            year = nextYear,
+            month = dob.month,
+            day = min(dob.day, daysInMonth(nextYear, dob.month)),
+        )
+    } else {
+        candidateThisYear
+    }
+    val daysUntil = (toEpochDay(nextBirthdayDate) - todayEpoch).coerceAtLeast(0L)
 
     return AgeDetails(
         years = years,
         months = months,
         days = days,
-        totalMonths = totalMonths,
+        totalMonths = totalMonths.toLong(),
         totalWeeks = totalWeeks,
         totalDays = totalDays,
-        nextBirthdayMillis = nextBday.timeInMillis,
+        nextBirthdayUtcMillis = nextBirthdayDate.toUtcMillis(),
         daysUntilNextBirthday = daysUntil,
     )
 }

@@ -244,6 +244,7 @@ fun OmniCalcApp(viewModel: OmniCalcViewModel) {
                     composable(AppRoutes.UNIT_CONVERTER) {
                         UnitConverterScreen(
                             initialCategoryName = "LENGTH",
+                            viewModel = viewModel,
                             onBack = { navController.popBackStack() },
                         )
                     }
@@ -255,6 +256,7 @@ fun OmniCalcApp(viewModel: OmniCalcViewModel) {
                         val cat = entry.arguments?.getString("category") ?: "LENGTH"
                         UnitConverterScreen(
                             initialCategoryName = cat,
+                            viewModel = viewModel,
                             onBack = { navController.popBackStack() },
                         )
                     }
@@ -262,6 +264,7 @@ fun OmniCalcApp(viewModel: OmniCalcViewModel) {
                     composable(AppRoutes.CURRENCY_CONVERTER) {
                         CurrencyConverterScreen(
                             onBack = { navController.popBackStack() },
+                            viewModel = viewModel,
                         )
                     }
 
@@ -280,12 +283,14 @@ fun OmniCalcApp(viewModel: OmniCalcViewModel) {
                     composable(AppRoutes.PROGRAMMER_CALCULATOR) {
                         ProgrammerCalculatorScreen(
                             onBack = { navController.popBackStack() },
+                            viewModel = viewModel,
                         )
                     }
 
                     composable(AppRoutes.GRAPH_PLOTTER) {
                         GraphPlotterScreen(
                             onBack = { navController.popBackStack() },
+                            viewModel = viewModel,
                         )
                     }
 

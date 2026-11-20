@@ -24,7 +24,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -38,6 +37,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.SampleCatalogs
+import com.example.ui.components.ErrorStateBanner
 import com.example.ui.components.OmniCard
 import com.example.ui.components.OmniInputField
 import com.example.ui.components.OmniTopBar
@@ -47,36 +47,102 @@ import com.example.ui.theme.AccentCyan
 import com.example.ui.theme.AccentEmerald
 import com.example.ui.theme.JetBrainsMonoFontFamily
 
+enum class BmiCategory(val label: String) {
+    UNDERWEIGHT("Underweight"),
+    NORMAL("Normal weight"),
+    OVERWEIGHT("Overweight"),
+    OBESITY("Obesity"),
+}
+
+data class BmiResult(
+    val bmi: Double,
+    val category: BmiCategory,
+    val minHealthyWeight: Double,
+    val maxHealthyWeight: Double,
+    val weightUnitLabel: String,
+)
+
+sealed class BmiValidationResult {
+    data class Valid(val result: BmiResult) : BmiValidationResult()
+    data class Invalid(val message: String) : BmiValidationResult()
+}
+
+private const val KG_PER_LB = 0.45359237
+private const val METERS_PER_INCH = 0.0254
+
+fun classifyBmi(bmi: Double): BmiCategory = when {
+    bmi < 18.5 -> BmiCategory.UNDERWEIGHT
+    bmi < 25.0 -> BmiCategory.NORMAL
+    bmi < 30.0 -> BmiCategory.OVERWEIGHT
+    else -> BmiCategory.OBESITY
+}
+
+fun calculateBmi(
+    heightInput: String,
+    weightInput: String,
+    useMetric: Boolean,
+): BmiValidationResult {
+    val rawH = heightInput.trim().toDoubleOrNull()
+    val rawW = weightInput.trim().toDoubleOrNull()
+    if (rawH == null || rawW == null) {
+        return BmiValidationResult.Invalid("Please enter valid numeric values for height and weight.")
+    }
+    if (!rawH.isFinite() || !rawW.isFinite() || rawH <= 0.0 || rawW <= 0.0) {
+        return BmiValidationResult.Invalid("Height and weight must be greater than zero.")
+    }
+
+    val heightMeters = if (useMetric) rawH / 100.0 else rawH * METERS_PER_INCH
+    val weightKg = if (useMetric) rawW else rawW * KG_PER_LB
+
+    if (heightMeters !in 0.3..3.0 || weightKg !in 1.0..500.0) {
+        val rangeHint = if (useMetric) {
+            "Enter a height between 30–300 cm and weight between 1–500 kg."
+        } else {
+            "Enter a height between 12–118 in and weight between 2.2–1100 lbs."
+        }
+        return BmiValidationResult.Invalid(rangeHint)
+    }
+
+    val bmi = weightKg / (heightMeters * heightMeters)
+    val minHealthyKg = 18.5 * heightMeters * heightMeters
+    val maxHealthyKg = 24.9 * heightMeters * heightMeters
+
+    val minHealthyDisplay = if (useMetric) minHealthyKg else minHealthyKg / KG_PER_LB
+    val maxHealthyDisplay = if (useMetric) maxHealthyKg else maxHealthyKg / KG_PER_LB
+    val weightUnit = if (useMetric) "kg" else "lbs"
+
+    return BmiValidationResult.Valid(
+        BmiResult(
+            bmi = bmi,
+            category = classifyBmi(bmi),
+            minHealthyWeight = minHealthyDisplay,
+            maxHealthyWeight = maxHealthyDisplay,
+            weightUnitLabel = weightUnit,
+        )
+    )
+}
+
 @Composable
 fun BmiCalculatorScreen(
     onBack: () -> Unit,
 ) {
-    var gender by remember { mutableStateOf("Unspecified") }
     var useMetric by remember { mutableStateOf(true) }
     var heightInput by remember { mutableStateOf("") }
     var weightInput by remember { mutableStateOf("") }
-    var computedBmi by remember { mutableStateOf<Double?>(null) }
-    var computedMinHealthyKg by remember { mutableStateOf(0.0) }
-    var computedMaxHealthyKg by remember { mutableStateOf(0.0) }
+    var bmiResult by remember { mutableStateOf<BmiResult?>(null) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
 
     fun recalculate() {
-        val rawH = heightInput.toDoubleOrNull() ?: 0.0
-        val rawW = weightInput.toDoubleOrNull() ?: 0.0
-        val heightMeters = if (useMetric) rawH / 100.0 else rawH * 0.0254
-        val weightKg = if (useMetric) rawW else rawW * 0.45359237
-        if (heightMeters > 0.3 && weightKg > 1.0) {
-            computedBmi = weightKg / (heightMeters * heightMeters)
-            computedMinHealthyKg = 18.5 * heightMeters * heightMeters
-            computedMaxHealthyKg = 24.9 * heightMeters * heightMeters
+        when (val validation = calculateBmi(heightInput, weightInput, useMetric)) {
+            is BmiValidationResult.Valid -> {
+                bmiResult = validation.result
+                errorMessage = null
+            }
+            is BmiValidationResult.Invalid -> {
+                bmiResult = null
+                errorMessage = validation.message
+            }
         }
-    }
-
-    val bmiValue = computedBmi ?: 0.0
-    val (categoryLabel, categoryColor) = when {
-        bmiValue < 18.5 -> "Underweight" to AccentCyan
-        bmiValue < 25.0 -> "Normal weight" to AccentEmerald
-        bmiValue < 30.0 -> "Overweight" to AccentAmber
-        else -> "Obesity" to AccentCoral
     }
 
     Scaffold(
@@ -105,27 +171,6 @@ fun BmiCalculatorScreen(
             ) {
                 OmniCard {
                     Text(
-                        text = "Profile (Optional)",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("Male", "Female", "Unspecified").forEach { option ->
-                            FilterChip(
-                                selected = gender == option,
-                                onClick = { gender = option },
-                                label = { Text(option) },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = MaterialTheme.colorScheme.primary,
-                                    selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
-                                ),
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
                         text = "Measurement Units",
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.onSurface,
@@ -139,7 +184,8 @@ fun BmiCalculatorScreen(
                                     useMetric = true
                                     heightInput = ""
                                     weightInput = ""
-                                    computedBmi = null
+                                    bmiResult = null
+                                    errorMessage = null
                                 }
                             },
                             label = { Text("Metric (cm / kg)") },
@@ -147,6 +193,7 @@ fun BmiCalculatorScreen(
                                 selectedContainerColor = MaterialTheme.colorScheme.primary,
                                 selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
                             ),
+                            modifier = Modifier.testTag("bmi_unit_metric"),
                         )
                         FilterChip(
                             selected = !useMetric,
@@ -155,7 +202,8 @@ fun BmiCalculatorScreen(
                                     useMetric = false
                                     heightInput = ""
                                     weightInput = ""
-                                    computedBmi = null
+                                    bmiResult = null
+                                    errorMessage = null
                                 }
                             },
                             label = { Text("Imperial (in / lbs)") },
@@ -163,13 +211,17 @@ fun BmiCalculatorScreen(
                                 selectedContainerColor = MaterialTheme.colorScheme.primary,
                                 selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
                             ),
+                            modifier = Modifier.testTag("bmi_unit_imperial"),
                         )
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))
                     OmniInputField(
                         value = heightInput,
-                        onValueChange = { heightInput = it },
+                        onValueChange = {
+                            heightInput = it
+                            errorMessage = null
+                        },
                         label = if (useMetric) "Height (cm)" else "Height (inches)",
                         suffixText = if (useMetric) "cm" else "in",
                         testTag = "bmi_height_input",
@@ -177,7 +229,10 @@ fun BmiCalculatorScreen(
                     Spacer(modifier = Modifier.height(12.dp))
                     OmniInputField(
                         value = weightInput,
-                        onValueChange = { weightInput = it },
+                        onValueChange = {
+                            weightInput = it
+                            errorMessage = null
+                        },
                         label = if (useMetric) "Weight (kg)" else "Weight (lbs)",
                         suffixText = if (useMetric) "kg" else "lbs",
                         testTag = "bmi_weight_input",
@@ -196,7 +251,15 @@ fun BmiCalculatorScreen(
                     }
                 }
 
-                if (computedBmi == null) {
+                if (!errorMessage.isNullOrBlank()) {
+                    ErrorStateBanner(
+                        message = errorMessage!!,
+                        modifier = Modifier.testTag("bmi_error_banner"),
+                    )
+                }
+
+                val activeResult = bmiResult
+                if (activeResult == null) {
                     OmniCard {
                         Text(
                             text = "No BMI result yet",
@@ -211,6 +274,13 @@ fun BmiCalculatorScreen(
                         )
                     }
                 } else {
+                    val categoryColor = when (activeResult.category) {
+                        BmiCategory.UNDERWEIGHT -> AccentCyan
+                        BmiCategory.NORMAL -> AccentEmerald
+                        BmiCategory.OVERWEIGHT -> AccentAmber
+                        BmiCategory.OBESITY -> AccentCoral
+                    }
+
                     // Visual Result Card
                     Surface(
                         shape = MaterialTheme.shapes.large,
@@ -230,7 +300,7 @@ fun BmiCalculatorScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                     Text(
-                                        text = SampleCatalogs.formatNumber(bmiValue, 1, false),
+                                        text = SampleCatalogs.formatNumber(activeResult.bmi, 1, false),
                                         style = MaterialTheme.typography.displayLarge.copy(
                                             fontFamily = JetBrainsMonoFontFamily,
                                             fontWeight = FontWeight.Bold,
@@ -246,10 +316,12 @@ fun BmiCalculatorScreen(
                                     border = BorderStroke(1.dp, categoryColor.copy(alpha = 0.5f)),
                                 ) {
                                     Text(
-                                        text = categoryLabel,
+                                        text = activeResult.category.label,
                                         style = MaterialTheme.typography.titleSmall,
                                         color = categoryColor,
-                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                                        modifier = Modifier
+                                            .padding(horizontal = 14.dp, vertical = 7.dp)
+                                            .testTag("bmi_category_badge"),
                                     )
                                 }
                             }
@@ -257,7 +329,7 @@ fun BmiCalculatorScreen(
                             Spacer(modifier = Modifier.height(18.dp))
 
                             // Visual BMI Scale
-                            BmiVisualScale(bmi = bmiValue)
+                            BmiVisualScale(bmi = activeResult.bmi)
 
                             Spacer(modifier = Modifier.height(16.dp))
 
@@ -271,11 +343,12 @@ fun BmiCalculatorScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                                 Text(
-                                    text = "${SampleCatalogs.formatNumber(computedMinHealthyKg, 1, false)} – ${SampleCatalogs.formatNumber(computedMaxHealthyKg, 1, false)} kg",
+                                    text = "${SampleCatalogs.formatNumber(activeResult.minHealthyWeight, 1, false)} – ${SampleCatalogs.formatNumber(activeResult.maxHealthyWeight, 1, false)} ${activeResult.weightUnitLabel}",
                                     style = MaterialTheme.typography.titleSmall.copy(
                                         fontFamily = JetBrainsMonoFontFamily
                                     ),
                                     color = AccentEmerald,
+                                    modifier = Modifier.testTag("bmi_healthy_range"),
                                 )
                             }
                         }

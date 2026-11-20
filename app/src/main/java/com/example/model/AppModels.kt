@@ -51,6 +51,7 @@ data class HistoryEntry(
     val timeLabel: String,
     val group: HistoryGroup,
     val reusableRoute: String = "calculator",
+    val timestampMillis: Long = System.currentTimeMillis(),
 )
 
 data class CurrencyInfo(
@@ -105,4 +106,25 @@ data class AppSettings(
     val thousandsSeparator: Boolean = true,
     val angleMode: AngleMode = AngleMode.DEG,
     val language: String = "English",
-)
+    val currencyCode: String = "INR",
+) {
+    fun currencySymbol(): String = symbolForCurrencyCode(currencyCode)
+
+    companion object {
+        val supportedCurrencyCodes: List<Pair<String, String>> = listOf(
+            "INR" to "₹",
+            "USD" to "$",
+            "EUR" to "€",
+            "GBP" to "£",
+            "JPY" to "¥",
+            "AUD" to "A$",
+            "CAD" to "C$",
+            "AED" to "د.إ",
+            "CHF" to "CHF",
+            "SGD" to "S$",
+        )
+
+        fun symbolForCurrencyCode(code: String): String =
+            supportedCurrencyCodes.firstOrNull { it.first.equals(code, ignoreCase = true) }?.second ?: "₹"
+    }
+}

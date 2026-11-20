@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Top-left '+' key with cutout -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M37,31 H47 A5,5 0 0 1 52,36 V46 A5,5 0 0 1 47,51 H37 A5,5 0 0 1 32,46 V36 A5,5 0 0 1 37,31 Z M40.6,36 H43.4 V39.6 H47 V42.4 H43.4 V46 H40.6 V42.4 H37 V39.6 H40.6 Z" />
+    <!-- Top-right '-' key with cutout -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M61,31 H71 A5,5 0 0 1 76,36 V46 A5,5 0 0 1 71,51 H61 A5,5 0 0 1 56,46 V36 A5,5 0 0 1 61,31 Z M61,39.6 H71 V42.4 H61 Z" />
+    <!-- Bottom-left 'x' key with cutout -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M37,55 H47 A5,5 0 0 1 52,60 V70 A5,5 0 0 1 47,75 H37 A5,5 0 0 1 32,70 V60 A5,5 0 0 1 37,55 Z M38.5,60.3 L42,63.8 L45.5,60.3 L47.5,62.3 L44,65.8 L47.5,69.3 L45.5,71.3 L42,67.8 L38.5,71.3 L36.5,69.3 L40,65.8 L36.5,62.3 Z" />
+    <!-- Bottom-right '÷' key with cutout + smaller analytics badge notch -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M61,55 H71 A5,5 0 0 1 76,60 V64.5 A11,11 0 0 0 65,75 H61 A5,5 0 0 1 56,70 V60 A5,5 0 0 1 61,55 Z M66,58.5 A1.6,1.6 0 1 1 66,61.7 A1.6,1.6 0 1 1 66,58.5 Z M61,63.6 H71 V66.2 H61 Z" />
+    <!-- Small analytics badge with 3 ascending bars -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M73.5,66.5 H78.5 A2.5,2.5 0 0 1 81,69 V74 A5,5 0 0 1 76,79 H69.5 A2.5,2.5 0 0 1 67,76.5 V73 A6.5,6.5 0 0 1 73.5,66.5 Z M69.5,73.5 H71.5 V76.8 H69.5 Z M73,71.5 H75 V76.8 H73 Z M76.5,69.2 H78.5 V76.8 H76.5 Z" />
+</vector>

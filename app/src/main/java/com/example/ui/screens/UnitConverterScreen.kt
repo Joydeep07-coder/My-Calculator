@@ -56,11 +56,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.SampleCatalogs
+import com.example.model.AppSettings
 import com.example.model.RecentConversion
 import com.example.model.UnitCategory
 import com.example.model.UnitDef
+import com.example.state.OmniCalcViewModel
+import com.example.ui.components.ErrorStateBanner
 import com.example.ui.components.OmniCard
 import com.example.ui.components.OmniInputField
 import com.example.ui.components.OmniTopBar
@@ -68,15 +73,73 @@ import com.example.ui.theme.JetBrainsMonoFontFamily
 import kotlinx.coroutines.launch
 import java.util.UUID
 
+sealed class UnitConversionResult {
+    data object Empty : UnitConversionResult()
+    data class Error(val message: String) : UnitConversionResult()
+    data class Valid(val value: Double, val formatted: String) : UnitConversionResult()
+}
+
+fun evaluateUnitConversion(
+    category: UnitCategory,
+    fromUnit: UnitDef,
+    toUnit: UnitDef,
+    inputText: String,
+    settings: AppSettings = AppSettings(),
+): UnitConversionResult {
+    if (inputText.isBlank()) {
+        return UnitConversionResult.Empty
+    }
+    val parsed = inputText.trim().toDoubleOrNull()
+        ?: return UnitConversionResult.Error("Enter a valid numeric value.")
+    if (!parsed.isFinite()) {
+        return UnitConversionResult.Error("Enter a finite numeric value.")
+    }
+
+    if (category == UnitCategory.TEMPERATURE) {
+        when (fromUnit.id) {
+            "k" -> if (parsed < 0.0) return UnitConversionResult.Error("Temperature cannot be below 0 K.")
+            "c" -> if (parsed < -273.15) return UnitConversionResult.Error("Temperature cannot be below -273.15 °C.")
+            "f" -> if (parsed < -459.67) return UnitConversionResult.Error("Temperature cannot be below -459.67 °F.")
+        }
+    }
+
+    if (category == UnitCategory.FUEL) {
+        if (parsed < 0.0) {
+            return UnitConversionResult.Error("Fuel consumption cannot be negative.")
+        }
+        if (parsed == 0.0 && (fromUnit.id == "l100" || toUnit.id == "l100") && fromUnit.id != toUnit.id) {
+            return UnitConversionResult.Error("Value must be greater than 0 for L/100km conversion.")
+        }
+    }
+
+    val converted = SampleCatalogs.convertUnit(category, fromUnit, toUnit, parsed)
+    if (!converted.isFinite()) {
+        return UnitConversionResult.Error("Converted result is out of range.")
+    }
+    val formatted = SampleCatalogs.formatFlexibleNumber(
+        value = converted,
+        preferredPrecision = settings.decimalPrecision,
+        useGrouping = settings.thousandsSeparator,
+    )
+    return UnitConversionResult.Valid(value = converted, formatted = formatted)
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UnitConverterScreen(
     initialCategoryName: String = "LENGTH",
+    viewModel: OmniCalcViewModel? = null,
     onBack: () -> Unit,
 ) {
     val startCategory = remember(initialCategoryName) {
         UnitCategory.entries.firstOrNull { it.name.equals(initialCategoryName, ignoreCase = true) }
             ?: UnitCategory.LENGTH
+    }
+
+    val settings = if (viewModel != null) {
+        viewModel.settings.collectAsStateWithLifecycle().value
+    } else {
+        AppSettings()
     }
 
     var selectedCategory by remember { mutableStateOf(startCategory) }
@@ -96,9 +159,15 @@ fun UnitConverterScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    val numericInput = inputValue.toDoubleOrNull() ?: 0.0
-    val converted = SampleCatalogs.convertUnit(selectedCategory, fromUnit, toUnit, numericInput)
-    val formattedResult = SampleCatalogs.formatNumber(converted, precision = 6, useGrouping = true)
+    val conversionResult = remember(selectedCategory, fromUnit, toUnit, inputValue, settings) {
+        evaluateUnitConversion(
+            category = selectedCategory,
+            fromUnit = fromUnit,
+            toUnit = toUnit,
+            inputText = inputValue,
+            settings = settings,
+        )
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -124,16 +193,17 @@ fun UnitConverterScreen(
                     .verticalScroll(rememberScrollState())
                     .padding(bottom = 24.dp),
             ) {
-                // 12 Categories horizontal selector
+                // 12 Categories horizontally scrollable selector
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.testTag("unit_category_row"),
                 ) {
                     items(UnitCategory.entries) { category ->
                         FilterChip(
                             selected = selectedCategory == category,
                             onClick = { selectedCategory = category },
-                            label = { Text(category.title) },
+                            label = { Text(category.title, maxLines = 1) },
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = MaterialTheme.colorScheme.primary,
                                 selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
@@ -158,7 +228,11 @@ fun UnitConverterScreen(
                                 text = "From",
                                 style = MaterialTheme.typography.labelLarge,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
+                            Spacer(modifier = Modifier.width(8.dp))
                             UnitSelectorPill(
                                 unit = fromUnit,
                                 onClick = { pickingForFrom = true },
@@ -170,6 +244,7 @@ fun UnitConverterScreen(
                             value = inputValue,
                             onValueChange = { inputValue = it },
                             label = "${fromUnit.name} (${fromUnit.symbol})",
+                            placeholder = "Enter value",
                             testTag = "unit_input_field",
                         )
                     }
@@ -204,6 +279,13 @@ fun UnitConverterScreen(
                         }
                     }
 
+                    if (conversionResult is UnitConversionResult.Error) {
+                        ErrorStateBanner(
+                            message = conversionResult.message,
+                            modifier = Modifier.testTag("unit_error_banner"),
+                        )
+                    }
+
                     // To Unit Result Card
                     Surface(
                         shape = MaterialTheme.shapes.large,
@@ -223,7 +305,11 @@ fun UnitConverterScreen(
                                     text = "To (${toUnit.name})",
                                     style = MaterialTheme.typography.labelLarge,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.weight(1f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
+                                Spacer(modifier = Modifier.width(8.dp))
                                 UnitSelectorPill(
                                     unit = toUnit,
                                     onClick = { pickingForFrom = false },
@@ -236,8 +322,12 @@ fun UnitConverterScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
+                                val displayText = when (conversionResult) {
+                                    is UnitConversionResult.Valid -> "${conversionResult.formatted} ${toUnit.symbol}"
+                                    else -> "—"
+                                }
                                 Text(
-                                    text = "$formattedResult ${toUnit.symbol}",
+                                    text = displayText,
                                     style = MaterialTheme.typography.displayMedium.copy(
                                         fontFamily = JetBrainsMonoFontFamily,
                                         fontWeight = FontWeight.Bold,
@@ -248,22 +338,29 @@ fun UnitConverterScreen(
                                         .testTag("unit_converted_result"),
                                 )
                                 IconButton(
+                                    enabled = conversionResult is UnitConversionResult.Valid,
                                     onClick = {
+                                        val valid = conversionResult as? UnitConversionResult.Valid ?: return@IconButton
                                         val entry = RecentConversion(
                                             id = UUID.randomUUID().toString(),
                                             category = selectedCategory,
-                                            summary = "$inputValue ${fromUnit.symbol} = $formattedResult ${toUnit.symbol}",
+                                            summary = "${inputValue.trim()} ${fromUnit.symbol} = ${valid.formatted} ${toUnit.symbol}",
                                         )
                                         recentConversions = (listOf(entry) + recentConversions).take(8)
                                         scope.launch {
                                             snackbarHostState.showSnackbar("Added to recent conversions")
                                         }
                                     },
+                                    modifier = Modifier.testTag("unit_bookmark_button"),
                                 ) {
                                     Icon(
                                         imageVector = Icons.Rounded.BookmarkAdd,
                                         contentDescription = "Save conversion",
-                                        tint = MaterialTheme.colorScheme.primary,
+                                        tint = if (conversionResult is UnitConversionResult.Valid) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                                        },
                                     )
                                 }
                             }
@@ -299,7 +396,9 @@ fun UnitConverterScreen(
                                             fontFamily = JetBrainsMonoFontFamily
                                         ),
                                         color = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.weight(1f),
                                     )
+                                    Spacer(modifier = Modifier.width(8.dp))
                                     Surface(
                                         shape = RoundedCornerShape(50),
                                         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -429,6 +528,8 @@ private fun UnitSelectorPill(
                 text = "${unit.name} (${unit.symbol})",
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Spacer(modifier = Modifier.width(4.dp))
             Icon(

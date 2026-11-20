@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -25,6 +26,8 @@ import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Replay
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -68,18 +71,26 @@ fun HistoryScreen(
 ) {
     val entries by viewModel.history.collectAsStateWithLifecycle()
     var searchQuery by remember { mutableStateOf("") }
+    var selectedToolFilter by remember { mutableStateOf("All") }
     var showClearDialog by remember { mutableStateOf(false) }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
 
-    val filtered = remember(entries, searchQuery) {
-        if (searchQuery.isBlank()) entries
-        else entries.filter {
-            it.expression.contains(searchQuery, ignoreCase = true) ||
-                it.result.contains(searchQuery, ignoreCase = true) ||
-                it.toolName.contains(searchQuery, ignoreCase = true)
+    val availableToolFilters = remember(entries) {
+        listOf("All") + entries.map { it.toolName }.distinct()
+    }
+    val activeFilter = if (selectedToolFilter in availableToolFilters) selectedToolFilter else "All"
+
+    val filtered = remember(entries, searchQuery, activeFilter) {
+        entries.filter { entry ->
+            val matchesFilter = activeFilter == "All" || entry.toolName.equals(activeFilter, ignoreCase = true)
+            val matchesQuery = searchQuery.isBlank() ||
+                entry.expression.contains(searchQuery, ignoreCase = true) ||
+                entry.result.contains(searchQuery, ignoreCase = true) ||
+                entry.toolName.contains(searchQuery, ignoreCase = true)
+            matchesFilter && matchesQuery
         }
     }
 
@@ -158,6 +169,27 @@ fun HistoryScreen(
                         .testTag("history_search_input"),
                 )
 
+                if (entries.isNotEmpty()) {
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.testTag("history_filter_row"),
+                    ) {
+                        items(availableToolFilters) { filterName ->
+                            FilterChip(
+                                selected = activeFilter == filterName,
+                                onClick = { selectedToolFilter = filterName },
+                                label = { Text(filterName, maxLines = 1) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                    selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+                                ),
+                                modifier = Modifier.testTag("history_filter_$filterName"),
+                            )
+                        }
+                    }
+                }
+
                 if (grouped.isEmpty()) {
                     EmptyStateView(
                         icon = Icons.Rounded.History,
@@ -216,7 +248,9 @@ fun HistoryScreen(
 
                                         IconButton(
                                             onClick = { viewModel.deleteHistoryEntry(entry.id) },
-                                            modifier = Modifier.size(36.dp),
+                                            modifier = Modifier
+                                                .size(36.dp)
+                                                .testTag("history_delete_${entry.id}"),
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Rounded.DeleteOutline,
@@ -256,6 +290,7 @@ fun HistoryScreen(
                                                     snackbarHostState.showSnackbar("Copied ${entry.result}")
                                                 }
                                             },
+                                            modifier = Modifier.testTag("history_copy_${entry.id}"),
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Rounded.ContentCopy,
@@ -268,6 +303,7 @@ fun HistoryScreen(
                                         Spacer(modifier = Modifier.width(4.dp))
                                         TextButton(
                                             onClick = { onReuseEntry(entry) },
+                                            modifier = Modifier.testTag("history_reuse_${entry.id}"),
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Rounded.Replay,
@@ -290,7 +326,7 @@ fun HistoryScreen(
     if (showClearDialog) {
         ConfirmActionDialog(
             title = "Clear All History?",
-            message = "This will permanently remove all saved calculation entries from your session history.",
+            message = "This will permanently remove all saved calculation entries from your device storage.",
             confirmLabel = "Clear All",
             onConfirm = {
                 viewModel.clearAllHistory()

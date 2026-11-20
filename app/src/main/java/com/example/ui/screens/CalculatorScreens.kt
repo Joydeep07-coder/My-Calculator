@@ -100,30 +100,88 @@ fun CalculatorScreen(
         }
     }
 
+    fun evaluateWithPreviewFallback(expr: String, isDeg: Boolean): Double? {
+        SimpleExprHelper.evaluate(expr, isDegrees = isDeg)?.let { return it }
+        val openCount = expr.count { it == '(' }
+        val closeCount = expr.count { it == ')' }
+        if (openCount > closeCount) {
+            return SimpleExprHelper.evaluate(expr + ")".repeat(openCount - closeCount), isDegrees = isDeg)
+        }
+        return null
+    }
+
     fun updatePreview(expr: String) {
         if (expr.isBlank()) {
             resultText = "0"
             return
         }
-        val eval = SimpleExprHelper.evaluate(
-            expr,
-            isDegrees = settings.angleMode == AngleMode.DEG,
-        )
+        val isDeg = settings.angleMode == AngleMode.DEG
+        val eval = evaluateWithPreviewFallback(expr, isDeg)
         if (eval != null) {
             resultText = SampleCatalogs.formatNumber(
                 eval,
                 settings.decimalPrecision,
                 settings.thousandsSeparator,
             )
+        } else {
+            val last = expr.last()
+            val isIncomplete = last in setOf('+', '−', '-', '×', '÷', '^', '(', '.')
+            if (!isIncomplete) {
+                resultText = "Error"
+            }
+        }
+    }
+
+    LaunchedEffect(settings.angleMode, settings.decimalPrecision, settings.thousandsSeparator) {
+        if (expression.isNotBlank() && !justEvaluated) {
+            updatePreview(expression)
         }
     }
 
     fun appendToken(token: String) {
-        if (justEvaluated && token.firstOrNull()?.isDigit() == true) {
-            expression = token
+        val binaryOps = setOf("+", "×", "÷", "^")
+        val continuationTokens = setOf("+", "−", "×", "÷", "%", "^", "^2", "^3", "!")
+
+        if (justEvaluated) {
+            expression = if (token in continuationTokens) {
+                expression + token
+            } else if (token == ".") {
+                "0."
+            } else {
+                token
+            }
+            justEvaluated = false
+            updatePreview(expression)
+            return
+        }
+
+        if (token == ".") {
+            val currentNumberSegment = expression.takeLastWhile { it.isDigit() || it == '.' }
+            if (currentNumberSegment.contains('.')) return
+            expression += if (currentNumberSegment.isEmpty()) "0." else "."
+            justEvaluated = false
+            updatePreview(expression)
+            return
+        }
+
+        if (expression.isEmpty() && (token in binaryOps || token in setOf("%", "^2", "^3", "!"))) {
+            return
+        }
+
+        val lastChar = expression.lastOrNull()
+        val prevChar = if (expression.length >= 2) expression[expression.length - 2] else null
+        if (token in binaryOps && lastChar == '(') {
+            return
+        }
+        if (token in binaryOps && lastChar != null && lastChar in setOf('+', '−', '×', '÷', '^')) {
+            if (lastChar == '−' && (expression.length == 1 || prevChar in setOf('×', '÷', '^', '('))) return
+            expression = expression.dropLast(1) + token
+        } else if (token == "−" && lastChar != null && lastChar in setOf('+', '−')) {
+            expression = expression.dropLast(1) + token
         } else {
             expression += token
         }
+
         justEvaluated = false
         updatePreview(expression)
     }
@@ -132,7 +190,11 @@ fun CalculatorScreen(
         val openCount = expression.count { it == '(' }
         val closeCount = expression.count { it == ')' }
         val lastChar = expression.lastOrNull()
-        val token = if (openCount > closeCount && lastChar != null && (lastChar.isDigit() || lastChar == ')' || lastChar == 'π' || lastChar == 'e')) {
+        val token = if (
+            openCount > closeCount &&
+            lastChar != null &&
+            (lastChar.isDigit() || lastChar == ')' || lastChar == 'π' || lastChar == 'e' || lastChar == '!' || lastChar == '%')
+        ) {
             ")"
         } else {
             "("
@@ -163,13 +225,24 @@ fun CalculatorScreen(
             expression = formatted.replace(",", "")
             justEvaluated = true
         } else {
-            resultText = "Format Error"
+            resultText = "Error"
+            justEvaluated = false
         }
     }
 
     fun onBackspace() {
         if (expression.isNotEmpty()) {
-            expression = expression.dropLast(1)
+            val functionTokens = listOf(
+                "sin⁻¹(", "cos⁻¹(", "tan⁻¹(",
+                "sin(", "cos(", "tan(",
+                "log(", "ln(", "abs(", "√("
+            )
+            val matchedToken = functionTokens.firstOrNull { expression.endsWith(it) }
+            expression = if (matchedToken != null) {
+                expression.dropLast(matchedToken.length)
+            } else {
+                expression.dropLast(1)
+            }
             justEvaluated = false
             updatePreview(expression)
         }
@@ -177,6 +250,7 @@ fun CalculatorScreen(
 
     fun onClear() {
         expression = ""
+        previousExpression = ""
         resultText = "0"
         justEvaluated = false
     }
@@ -288,6 +362,7 @@ fun CalculatorScreen(
                 contentAlignment = Alignment.Center,
             ) {
                 val isWide = maxWidth >= 700.dp
+                val availableHeight = maxHeight
 
                 if (isWide) {
                     Row(
@@ -316,6 +391,7 @@ fun CalculatorScreen(
                             CalculatorKeypads(
                                 isScientific = isScientific,
                                 hapticEnabled = settings.hapticFeedback,
+                                soundEnabled = settings.buttonSound,
                                 onToken = ::appendToken,
                                 onParen = ::toggleSmartParentheses,
                                 onClear = ::onClear,
@@ -347,15 +423,22 @@ fun CalculatorScreen(
 
                         Spacer(modifier = Modifier.height(10.dp))
 
+                        val adaptiveKeyHeight = if (isScientific) {
+                            if (availableHeight < 480.dp) ((availableHeight - 220.dp) / 5f).coerceIn(40.dp, 54.dp) else 54.dp
+                        } else {
+                            if (availableHeight < 450.dp) ((availableHeight - 120.dp) / 5f).coerceIn(44.dp, 64.dp) else 64.dp
+                        }
+
                         CalculatorKeypads(
                             isScientific = isScientific,
                             hapticEnabled = settings.hapticFeedback,
+                            soundEnabled = settings.buttonSound,
                             onToken = ::appendToken,
                             onParen = ::toggleSmartParentheses,
                             onClear = ::onClear,
                             onBackspace = ::onBackspace,
                             onEquals = ::onEquals,
-                            compactKeyHeight = if (isScientific) 54.dp else 64.dp,
+                            compactKeyHeight = adaptiveKeyHeight,
                         )
                     }
                 }
@@ -499,6 +582,7 @@ private fun CalculatorDisplayCard(
 private fun CalculatorKeypads(
     isScientific: Boolean,
     hapticEnabled: Boolean,
+    soundEnabled: Boolean,
     onToken: (String) -> Unit,
     onParen: () -> Unit,
     onClear: () -> Unit,
@@ -546,6 +630,7 @@ private fun CalculatorKeypads(
                                 variant = KeypadKeyVariant.SCIENTIFIC,
                                 onClick = { onToken(token) },
                                 hapticEnabled = hapticEnabled,
+                                soundEnabled = soundEnabled,
                                 fontSize = 13.sp,
                                 height = 42.dp,
                                 modifier = Modifier.weight(1f),
@@ -590,6 +675,7 @@ private fun CalculatorKeypads(
                             }
                         },
                         hapticEnabled = hapticEnabled,
+                        soundEnabled = soundEnabled,
                         height = compactKeyHeight,
                         modifier = Modifier.weight(1f),
                     )
